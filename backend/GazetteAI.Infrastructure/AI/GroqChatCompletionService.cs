@@ -61,7 +61,9 @@ public sealed class GroqChatCompletionService
          * request and prevents rate-limit problems.
          */
         if (IsLanguageCommand(loweredQuestion) ||
-            IsClarificationCommand(loweredQuestion))
+            IsClarificationCommand(loweredQuestion) ||
+            IsGreeting(loweredQuestion) ||
+            IsAcknowledgement(loweredQuestion))
         {
             return CreateLocalAnalysis(
                 normalizedQuestion,
@@ -77,37 +79,65 @@ public sealed class GroqChatCompletionService
             Return only one valid JSON object in this format:
 
             {
+              "intent": "DocumentQuestion",
+              "requiresDocumentSearch": true,
+              "directResponse": "",
               "searchQuestion": "standalone document question",
               "responseLanguage": "English",
               "responseStyle": "standard",
               "isClarificationRequest": false,
+              "isTranslationRequest": false,
               "isFollowUp": false
             }
 
             Rules:
 
-            1. searchQuestion must be a complete standalone
+            1. intent must be exactly one of:
+               DocumentQuestion, DocumentFollowUp,
+               Clarification, Translation, Acknowledgement,
+               Greeting or OutOfScope.
+
+            2. requiresDocumentSearch must be false only for
+               Greeting and Acknowledgement. It must be true
+               for document questions, follow-ups,
+               clarifications and translations.
+
+            3. For Greeting or Acknowledgement, put a short,
+               friendly reply in directResponse. For every
+               other intent, directResponse must be empty.
+
+            4. searchQuestion must be a complete standalone
                question used to search the uploaded document.
 
-            2. Use conversation history only to understand
+            5. Use conversation history only to understand
                follow-up references.
 
-            3. Never answer the question.
+            6. Messages such as "what is its scope?",
+               "what does it do?" and "mokad karanne?" are
+               document follow-ups when history contains a
+               document topic. Rewrite them as standalone
+               document questions.
 
-            4. Detect the language requested by the latest user.
+            7. Messages such as "okay", "hari", "hri okay",
+               "thanks" and "got it" are acknowledgements,
+               not document questions.
 
-            5. Tanglish means spoken Tamil written using
+            8. Never answer document questions during analysis.
+
+            9. Detect the language requested by the latest user.
+
+            10. Tanglish means spoken Tamil written using
                Latin letters.
 
-            6. Singlish means spoken Sinhala written using
+            11. Singlish means spoken Sinhala written using
                Latin letters.
 
-            7. Do not mix Tanglish and Singlish.
+            12. Do not mix Tanglish and Singlish.
 
-            8. responseStyle must be:
+            13. responseStyle must be:
                standard, simple or detailed.
 
-            9. Return JSON only.
+            14. Return JSON only.
                Do not use Markdown.
             """;
 
@@ -456,6 +486,16 @@ public sealed class GroqChatCompletionService
             IsClarificationCommand(
                 loweredQuestion);
 
+        var isGreeting =
+            IsGreeting(loweredQuestion);
+
+        var isAcknowledgement =
+            IsAcknowledgement(loweredQuestion);
+
+        var requiresDocumentSearch =
+            !isGreeting &&
+            !isAcknowledgement;
+
         var searchQuestion =
             isLanguageRequest || isClarification
                 ? FindPreviousRealQuestion(
@@ -465,6 +505,28 @@ public sealed class GroqChatCompletionService
 
         var analysis = new ConversationAnalysis
         {
+            Intent = isGreeting
+                ? "Greeting"
+                : isAcknowledgement
+                    ? "Acknowledgement"
+                    : isLanguageRequest
+                        ? "Translation"
+                        : isClarification
+                            ? "Clarification"
+                            : history.Count > 0
+                                ? "DocumentFollowUp"
+                                : "DocumentQuestion",
+
+            RequiresDocumentSearch =
+                requiresDocumentSearch,
+
+            DirectResponse =
+                requiresDocumentSearch
+                    ? string.Empty
+                    : BuildDirectResponse(
+                        question,
+                        isGreeting),
+
             SearchQuestion = searchQuestion,
             ResponseLanguage =
                 DetectResponseLanguage(question),
@@ -508,6 +570,30 @@ public sealed class GroqChatCompletionService
         var clarificationCommand =
             IsClarificationCommand(normalized);
 
+        var greeting =
+            IsGreeting(normalized);
+
+        var acknowledgement =
+            IsAcknowledgement(normalized);
+
+        if (greeting || acknowledgement)
+        {
+            analysis.Intent = greeting
+                ? "Greeting"
+                : "Acknowledgement";
+
+            analysis.RequiresDocumentSearch = false;
+            analysis.DirectResponse =
+                BuildDirectResponse(
+                    question,
+                    greeting);
+
+            analysis.SearchQuestion = string.Empty;
+            analysis.IsFollowUp = false;
+            analysis.IsClarificationRequest = false;
+            analysis.IsTranslationRequest = false;
+        }
+
         if (languageCommand ||
             clarificationCommand)
         {
@@ -526,11 +612,17 @@ public sealed class GroqChatCompletionService
 
         if (languageCommand)
         {
+            analysis.Intent = "Translation";
+            analysis.RequiresDocumentSearch = true;
+            analysis.DirectResponse = string.Empty;
             analysis.IsTranslationRequest = true;
         }
 
         if (clarificationCommand)
         {
+            analysis.Intent = "Clarification";
+            analysis.RequiresDocumentSearch = true;
+            analysis.DirectResponse = string.Empty;
             analysis.IsClarificationRequest = true;
             analysis.IsClarification = true;
             analysis.ResponseStyle = "simple";
@@ -602,9 +694,9 @@ public sealed class GroqChatCompletionService
 
         if (ContainsAny(
                 normalized,
-                "français",
+                "franÃ§ais",
                 "french",
-                "en français"))
+                "en franÃ§ais"))
         {
             return "French";
         }
@@ -612,7 +704,7 @@ public sealed class GroqChatCompletionService
         if (ContainsAny(
                 normalized,
                 "hindi",
-                "हिंदी"))
+                "à¤¹à¤¿à¤‚à¤¦à¥€"))
         {
             return "Hindi";
         }
@@ -635,6 +727,22 @@ public sealed class GroqChatCompletionService
         if (ContainsSinhalaCharacters(question))
         {
             return "Sinhala";
+        }
+
+        if (ContainsAny(
+                normalized,
+                "mokada",
+                "mokakda",
+                "mokad karanne",
+                "monawada",
+                "kohomada",
+                "hari",
+                "hri",
+                "kiyanna",
+                "karanne",
+                "eka mokakda"))
+        {
+            return "Singlish";
         }
 
         if (ContainsAny(
@@ -683,7 +791,9 @@ public sealed class GroqChatCompletionService
                 content.ToLowerInvariant();
 
             if (IsLanguageCommand(normalized) ||
-                IsClarificationCommand(normalized))
+                IsClarificationCommand(normalized) ||
+                IsGreeting(normalized) ||
+                IsAcknowledgement(normalized))
             {
                 continue;
             }
@@ -706,9 +816,9 @@ public sealed class GroqChatCompletionService
             "tamil la sollu",
             "tamil-la sollu",
             "tanglish la sollu",
-            "தமிழில் சொல்லுங்கள்",
-            "தமிழில் சொல்லு",
-            "சிங்களத்தில் சொல்லுங்கள்",
+            "à®¤à®®à®¿à®´à®¿à®²à¯ à®šà¯Šà®²à¯à®²à¯à®™à¯à®•à®³à¯",
+            "à®¤à®®à®¿à®´à®¿à®²à¯ à®šà¯Šà®²à¯à®²à¯",
+            "à®šà®¿à®™à¯à®•à®³à®¤à¯à®¤à®¿à®²à¯ à®šà¯Šà®²à¯à®²à¯à®™à¯à®•à®³à¯",
             "in english",
             "english la sollu",
             "english walin",
@@ -716,9 +826,9 @@ public sealed class GroqChatCompletionService
             "answer in sinhala",
             "answer in english",
             "answer in french",
-            "répondez en français",
-            "en français",
-            "उत्तर हिंदी में",
+            "rÃ©pondez en franÃ§ais",
+            "en franÃ§ais",
+            "à¤‰à¤¤à¥à¤¤à¤° à¤¹à¤¿à¤‚à¤¦à¥€ à¤®à¥‡à¤‚",
             "hindi mein",
             "hindi me");
     }
@@ -735,16 +845,154 @@ public sealed class GroqChatCompletionService
             "simple-a sollu",
             "easy ah sollu",
             "thelivaga sollu",
-            "தெளிவாக சொல்லுங்கள்",
-            "எளிமையாக சொல்லுங்கள்",
-            "புரியவில்லை",
+            "à®¤à¯†à®³à®¿à®µà®¾à®• à®šà¯Šà®²à¯à®²à¯à®™à¯à®•à®³à¯",
+            "à®Žà®³à®¿à®®à¯ˆà®¯à®¾à®• à®šà¯Šà®²à¯à®²à¯à®™à¯à®•à®³à¯",
+            "à®ªà¯à®°à®¿à®¯à®µà®¿à®²à¯à®²à¯ˆ",
             "therenne naha",
-            "තේරෙන්නේ නැහැ",
+            "à¶­à·šà¶»à·™à¶±à·Šà¶±à·š à¶±à·à·„à·",
             "simple walin kiyanna",
             "explain clearly",
             "explain simply",
             "i don't understand",
             "i do not understand");
+    }
+
+    private static bool IsGreeting(
+        string text)
+    {
+        var normalized =
+            NormalizeShortMessage(text);
+
+        return normalized is
+            "hi" or
+            "hello" or
+            "hey" or
+            "hi buddy" or
+            "hello buddy" or
+            "good morning" or
+            "good afternoon" or
+            "good evening" or
+            "vanakkam" or
+            "à®µà®£à®•à¯à®•à®®à¯" or
+            "ayubowan" or
+            "à¶†à¶ºà·”à¶¶à·à·€à¶±à·Š";
+    }
+
+    private static bool IsAcknowledgement(
+        string text)
+    {
+        var normalized =
+            NormalizeShortMessage(text);
+
+        return normalized is
+            "ok" or
+            "okay" or
+            "ok buddy" or
+            "okay buddy" or
+            "hari" or
+            "hari okay" or
+            "hri" or
+            "hri okay" or
+            "ela" or
+            "thanks" or
+            "thank you" or
+            "thanks buddy" or
+            "got it" or
+            "understood" or
+            "à®šà®°à®¿" or
+            "à®šà®°à®¿ à®¨à®©à¯à®±à®¿" or
+            "à®¨à®©à¯à®±à®¿" or
+            "à·„à¶»à·’" or
+            "à·ƒà·Šà¶­à·”à¶­à·’à¶ºà·’";
+    }
+
+    private static string NormalizeShortMessage(
+        string text)
+    {
+        return text
+            .Trim()
+            .Trim('.', ',', '!', '?', ';', ':')
+            .ToLowerInvariant();
+    }
+
+    private static string BuildDirectResponse(
+     string question,
+     bool isGreeting)
+    {
+        var normalized =
+            NormalizeShortMessage(question);
+
+        var language =
+            DetectResponseLanguage(question);
+
+        var isThanks =
+            ContainsAny(
+                normalized,
+                "thanks",
+                "thank you",
+                "thanks buddy",
+                "நன்றி",
+                "ස්තුතියි");
+
+        if (isThanks)
+        {
+            return language.Trim().ToLowerInvariant()
+                switch
+            {
+                "tamil" =>
+                    "வரவேற்கிறேன்! வேறு ஏதாவது உதவி வேண்டுமா?",
+
+                "tanglish" =>
+                    "Welcome! Vera edhavadhu help venuma?",
+
+                "sinhala" =>
+                    "ඔබව සාදරයෙන් පිළිගන්නවා! තවත් උදව්වක් අවශ්‍යද?",
+
+                "singlish" =>
+                    "Welcome! Thawa monawada help one?",
+
+                "french" =>
+                    "Avec plaisir ! Puis-je vous aider autrement ?",
+
+                "hindi" =>
+                    "आपका स्वागत है! क्या आपको कोई और सहायता चाहिए?",
+
+                _ =>
+                    "You’re welcome! Is there anything else I can help with?"
+            };
+        }
+
+        return language.Trim().ToLowerInvariant()
+            switch
+        {
+            "tamil" => isGreeting
+                ? "வணக்கம்! இந்த ஆவணத்தைப் பற்றி என்ன தெரிந்துகொள்ள விரும்புகிறீர்கள்?"
+                : "சரி! இந்த ஆவணத்தைப் பற்றி வேறு என்ன தெரிந்துகொள்ள விரும்புகிறீர்கள்?",
+
+            "tanglish" => isGreeting
+                ? "Vanakkam! Indha document pathi enna therinjukkanum?"
+                : "Sari! Indha document pathi vera enna therinjukkanum?",
+
+            "sinhala" => isGreeting
+                ? "ආයුබෝවන්! මෙම ලේඛනය ගැන ඔබට දැනගන්න අවශ්‍ය කුමක්ද?"
+                : "හරි! මෙම ලේඛනය ගැන තවත් මොනවාද දැනගන්න අවශ්‍ය?",
+
+            "singlish" => isGreeting
+                ? "Ayubowan! Me document eka gena monawada danaganna one?"
+                : "Hari! Me document eka gena thawa monawada danaganna one?",
+
+            "french" => isGreeting
+                ? "Bonjour ! Que souhaitez-vous savoir sur ce document ?"
+                : "D’accord ! Que souhaitez-vous savoir d’autre sur ce document ?",
+
+            "hindi" => isGreeting
+                ? "नमस्ते! आप इस दस्तावेज़ के बारे में क्या जानना चाहते हैं?"
+                : "ठीक है! आप इस दस्तावेज़ के बारे में और क्या जानना चाहते हैं?",
+
+            _ => isGreeting
+                ? "Hello! What would you like to know about this document?"
+                : "Okay! What else would you like to know about this document?"
+        };
     }
 
     private static string BuildLanguageInstruction(
@@ -839,22 +1087,22 @@ public sealed class GroqChatCompletionService
             .ToLowerInvariant() switch
         {
             "tamil" =>
-                "இந்த ஆவணத்தில் பதில் காணப்படவில்லை.",
+                "à®‡à®¨à¯à®¤ à®†à®µà®£à®¤à¯à®¤à®¿à®²à¯ à®ªà®¤à®¿à®²à¯ à®•à®¾à®£à®ªà¯à®ªà®Ÿà®µà®¿à®²à¯à®²à¯ˆ.",
 
             "tanglish" =>
                 "Indha document-la badhil kidaikkala.",
 
             "sinhala" =>
-                "මෙම ලේඛනයේ පිළිතුර සඳහන් කර නැහැ.",
+                "à¶¸à·™à¶¸ à¶½à·šà¶›à¶±à¶ºà·š à¶´à·’à·…à·’à¶­à·”à¶» à·ƒà¶³à·„à¶±à·Š à¶šà¶» à¶±à·à·„à·.",
 
             "singlish" =>
                 "Me document eke uththaraya sandahan wela naha.",
 
             "french" =>
-                "La réponse ne figure pas dans ce document.",
+                "La rÃ©ponse ne figure pas dans ce document.",
 
             "hindi" =>
-                "इस दस्तावेज़ में उत्तर नहीं मिला।",
+                "à¤‡à¤¸ à¤¦à¤¸à¥à¤¤à¤¾à¤µà¥‡à¤œà¤¼ à¤®à¥‡à¤‚ à¤‰à¤¤à¥à¤¤à¤° à¤¨à¤¹à¥€à¤‚ à¤®à¤¿à¤²à¤¾à¥¤",
 
             _ =>
                 "The answer was not found in this document."
@@ -919,8 +1167,65 @@ public sealed class GroqChatCompletionService
         string question,
         ConversationAnalysis analysis)
     {
+        var validIntents = new[]
+        {
+            "DocumentQuestion",
+            "DocumentFollowUp",
+            "Clarification",
+            "Translation",
+            "Acknowledgement",
+            "Greeting",
+            "OutOfScope"
+        };
+
         if (string.IsNullOrWhiteSpace(
-                analysis.SearchQuestion))
+                analysis.Intent) ||
+            !validIntents.Contains(
+                analysis.Intent,
+                StringComparer.OrdinalIgnoreCase))
+        {
+            analysis.Intent =
+                "DocumentQuestion";
+        }
+        else
+        {
+            analysis.Intent = validIntents
+                .First(intent => intent.Equals(
+                    analysis.Intent,
+                    StringComparison.OrdinalIgnoreCase));
+        }
+
+        var isDirectIntent =
+            analysis.Intent == "Greeting" ||
+            analysis.Intent == "Acknowledgement";
+
+        analysis.RequiresDocumentSearch =
+            !isDirectIntent;
+
+        if (isDirectIntent)
+        {
+            if (string.IsNullOrWhiteSpace(
+                    analysis.DirectResponse))
+            {
+                analysis.DirectResponse =
+                    BuildDirectResponse(
+                        question,
+                        analysis.Intent == "Greeting");
+            }
+
+            analysis.SearchQuestion = string.Empty;
+            analysis.IsFollowUp = false;
+            analysis.IsClarificationRequest = false;
+            analysis.IsTranslationRequest = false;
+        }
+        else
+        {
+            analysis.DirectResponse = string.Empty;
+        }
+
+        if (string.IsNullOrWhiteSpace(
+                analysis.SearchQuestion) &&
+            analysis.RequiresDocumentSearch)
         {
             analysis.SearchQuestion =
                 question.Trim();
@@ -943,6 +1248,9 @@ public sealed class GroqChatCompletionService
         analysis.SearchQuestion =
             analysis.SearchQuestion.Trim();
 
+        analysis.DirectResponse =
+            analysis.DirectResponse.Trim();
+
         analysis.ResponseLanguage =
             analysis.ResponseLanguage.Trim();
 
@@ -964,6 +1272,23 @@ public sealed class GroqChatCompletionService
 
         analysis.WritingStyle =
             analysis.ResponseStyle;
+
+        if (analysis.Intent == "Clarification")
+        {
+            analysis.IsClarificationRequest = true;
+            analysis.IsFollowUp = true;
+        }
+
+        if (analysis.Intent == "Translation")
+        {
+            analysis.IsTranslationRequest = true;
+            analysis.IsFollowUp = true;
+        }
+
+        if (analysis.Intent == "DocumentFollowUp")
+        {
+            analysis.IsFollowUp = true;
+        }
     }
 
     private static string FormatHistory(

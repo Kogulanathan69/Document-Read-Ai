@@ -155,6 +155,77 @@ public sealed class QuestionsController : ControllerBase
                 }
             }
 
+            /*
+             * Greeting and acknowledgement messages do not
+             * require document retrieval. This prevents
+             * unnecessary Ollama embeddings, irrelevant page
+             * scores and misleading "answer not found" replies.
+             */
+            if (!analysis.RequiresDocumentSearch)
+            {
+                var directAnswer =
+                    string.IsNullOrWhiteSpace(
+                        analysis.DirectResponse)
+                        ? "Okay! What else would you like " +
+                          "to know about this document?"
+                        : analysis.DirectResponse.Trim();
+
+                await SaveConversationMessagesAsync(
+                    conversationId,
+                    request.UserId,
+                    request.DocumentId,
+                    normalizedQuestion,
+                    directAnswer,
+                    cancellationToken);
+
+                return Ok(new
+                {
+                    conversationId,
+
+                    documentId =
+                        document.Id,
+
+                    fileName =
+                        document.FileName,
+
+                    question =
+                        normalizedQuestion,
+
+                    searchQuestion =
+                        string.Empty,
+
+                    intent =
+                        analysis.Intent,
+
+                    requiresDocumentSearch =
+                        false,
+
+                    detectedLanguage =
+                        analysis.DetectedLanguage,
+
+                    writingStyle =
+                        analysis.WritingStyle,
+
+                    responseInstruction =
+                        analysis.ResponseInstruction,
+
+                    isFollowUp =
+                        false,
+
+                    clarificationRequest =
+                        false,
+
+                    translationRequest =
+                        false,
+
+                    answer =
+                        directAnswer,
+
+                    sources =
+                        Array.Empty<object>()
+                });
+            }
+
             var chunks =
                 await _dbContext.DocumentChunks
                     .AsNoTracking()
@@ -241,64 +312,12 @@ public sealed class QuestionsController : ControllerBase
                     });
             }
 
-            var currentTime =
-                DateTime.UtcNow;
-
-            var userMessage =
-                new ChatMessage
-                {
-                    Id = Guid.NewGuid(),
-
-                    ConversationId =
-                        conversationId,
-
-                    UserId =
-                        request.UserId,
-
-                    DocumentId =
-                        request.DocumentId,
-
-                    Role = "User",
-
-                    /*
-                     * Database-ல் original user message
-                     * மட்டும் save செய்யப்படும்.
-                     */
-                    Content =
-                        normalizedQuestion,
-
-                    CreatedAt =
-                        currentTime
-                };
-
-            var assistantMessage =
-                new ChatMessage
-                {
-                    Id = Guid.NewGuid(),
-
-                    ConversationId =
-                        conversationId,
-
-                    UserId =
-                        request.UserId,
-
-                    DocumentId =
-                        request.DocumentId,
-
-                    Role = "Assistant",
-
-                    Content =
-                        answer.Trim(),
-
-                    CreatedAt =
-                        currentTime.AddMilliseconds(1)
-                };
-
-            _dbContext.ChatMessages.AddRange(
-                userMessage,
-                assistantMessage);
-
-            await _dbContext.SaveChangesAsync(
+            await SaveConversationMessagesAsync(
+                conversationId,
+                request.UserId,
+                request.DocumentId,
+                normalizedQuestion,
+                answer.Trim(),
                 cancellationToken);
 
             /*
@@ -352,6 +371,12 @@ public sealed class QuestionsController : ControllerBase
                     normalizedQuestion,
 
                 searchQuestion,
+
+                intent =
+                    analysis.Intent,
+
+                requiresDocumentSearch =
+                    analysis.RequiresDocumentSearch,
 
                 detectedLanguage =
                     analysis.DetectedLanguage,
@@ -452,6 +477,48 @@ public sealed class QuestionsController : ControllerBase
                         "Please try again."
                 });
         }
+    }
+
+    private async Task SaveConversationMessagesAsync(
+        Guid conversationId,
+        Guid userId,
+        Guid documentId,
+        string userContent,
+        string assistantContent,
+        CancellationToken cancellationToken)
+    {
+        var currentTime =
+            DateTime.UtcNow;
+
+        var userMessage = new ChatMessage
+        {
+            Id = Guid.NewGuid(),
+            ConversationId = conversationId,
+            UserId = userId,
+            DocumentId = documentId,
+            Role = "User",
+            Content = userContent.Trim(),
+            CreatedAt = currentTime
+        };
+
+        var assistantMessage = new ChatMessage
+        {
+            Id = Guid.NewGuid(),
+            ConversationId = conversationId,
+            UserId = userId,
+            DocumentId = documentId,
+            Role = "Assistant",
+            Content = assistantContent.Trim(),
+            CreatedAt =
+                currentTime.AddMilliseconds(1)
+        };
+
+        _dbContext.ChatMessages.AddRange(
+            userMessage,
+            assistantMessage);
+
+        await _dbContext.SaveChangesAsync(
+            cancellationToken);
     }
 
     private static string? ValidateRequest(

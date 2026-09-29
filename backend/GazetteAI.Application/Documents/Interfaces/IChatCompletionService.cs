@@ -5,17 +5,20 @@ namespace GazetteAI.Application.Documents.Interfaces;
 public interface IChatCompletionService
 {
     /*
-     * User message மற்றும் previous conversation history-ai
-     * analyse செய்து:
+     * Latest user message மற்றும் previous conversation
+     * history-ஐ analyse செய்யும்.
      *
-     * - search question
-     * - language
-     * - writing style
-     * - follow-up
-     * - clarification
-     * - translation request
+     * Returned ConversationAnalysis contains:
      *
-     * ஆகிய தகவல்களை return செய்யும்.
+     * - Intent
+     * - RequiresDocumentSearch
+     * - DirectResponse
+     * - SearchQuestion
+     * - ResponseLanguage
+     * - ResponseStyle
+     * - IsFollowUp
+     * - IsClarificationRequest
+     * - IsTranslationRequest
      */
     Task<ConversationAnalysis> AnalyzeConversationAsync(
         string question,
@@ -23,8 +26,13 @@ public interface IChatCompletionService
         CancellationToken cancellationToken = default);
 
     /*
-     * Document context, conversation history மற்றும்
-     * language analysis பயன்படுத்தி final answer உருவாக்கும்.
+     * Document search தேவைப்படும் messages-க்கு
+     * retrieved document context பயன்படுத்தி
+     * final answer உருவாக்கும்.
+     *
+     * Greeting மற்றும் acknowledgement போன்ற
+     * direct-response messages-க்கு இந்த method
+     * call செய்யப்படாது.
      */
     Task<string> GenerateAnswerAsync(
         string question,

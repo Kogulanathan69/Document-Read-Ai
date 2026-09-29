@@ -18,6 +18,15 @@ export interface AnswerSource {
   similarityScore: number;
 }
 
+export type ChatIntent =
+  | 'DocumentQuestion'
+  | 'DocumentFollowUp'
+  | 'Clarification'
+  | 'Translation'
+  | 'Acknowledgement'
+  | 'Greeting'
+  | 'OutOfScope';
+
 export interface AskDocumentResponse {
   conversationId: string;
   documentId: string;
@@ -25,26 +34,39 @@ export interface AskDocumentResponse {
   question: string;
 
   /*
-   * Document search-க்கு backend பயன்படுத்திய
-   * complete standalone question.
+   * Backend document search-க்கு பயன்படுத்திய
+   * standalone question.
+   *
+   * Greeting மற்றும் acknowledgement messages-க்கு
+   * இது empty string ஆக இருக்கும்.
    */
   searchQuestion: string;
 
   /*
-   * AI கண்டுபிடித்த language மற்றும் writing style.
+   * Latest user message-ன் detected intent.
    */
+  intent: ChatIntent;
+
+  /*
+   * false என்றால் document embedding மற்றும்
+   * retrieval நடைபெறவில்லை.
+   */
+  requiresDocumentSearch: boolean;
+
   detectedLanguage: string;
   writingStyle: string;
   responseInstruction: string;
 
-  /*
-   * Conversation message type.
-   */
   isFollowUp: boolean;
   clarificationRequest: boolean;
   translationRequest: boolean;
 
   answer: string;
+
+  /*
+   * Direct conversational response-க்கு empty array.
+   * Document answer-க்கு page sources இருக்கும்.
+   */
   sources: AnswerSource[];
 }
 

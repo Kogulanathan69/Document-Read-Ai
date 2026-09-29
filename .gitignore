@@ -1,0 +1,37 @@
+# .NET
+**/bin/
+**/obj/
+.vs/
+*.user
+*.suo
+TestResults/
+
+# Angular / Node
+**/node_modules/
+**/dist/
+.angular/
+coverage/
+npm-debug.log*
+
+# Secrets
+**/appsettings.Development.json
+**/appsettings.Local.json
+.env
+.env.*
+!.env.example
+
+# Editors
+.vscode/
+.idea/
+
+# Operating system
+Thumbs.db
+.DS_Store
+
+# Temporary files
+*.tmp
+*.log
+
+# Local reviewed-code backups
+GazetteAI_Final_Reviewed_Code/
+GazetteAI_Final_Code_Review.zip

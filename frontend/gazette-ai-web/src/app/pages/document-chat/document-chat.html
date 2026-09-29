@@ -1,0 +1,196 @@
+<main class="page-container">
+  <section class="document-card">
+    <header class="header">
+      <span class="logo">📄</span>
+
+      <div>
+        <h1>GazetteAI</h1>
+        <p>Upload a PDF and chat with your document</p>
+      </div>
+    </header>
+
+    <section class="upload-section">
+      <label class="file-box">
+        <span class="file-icon">📁</span>
+        <span>Select PDF document</span>
+
+        <input
+          type="file"
+          accept=".pdf,application/pdf"
+          (change)="onFileSelected($event)"
+        />
+      </label>
+
+      @if (selectedFile) {
+        <div class="selected-file">
+          <span>📄 {{ selectedFile.name }}</span>
+
+          <small>
+            {{ selectedFile.size / 1024 | number:'1.0-1' }}
+            KB
+          </small>
+        </div>
+      }
+
+      <button
+        type="button"
+        class="primary-button"
+        [disabled]="!selectedFile || isUploading"
+        (click)="uploadDocument()"
+      >
+        @if (isUploading) {
+          Uploading and processing...
+        } @else {
+          Upload PDF
+        }
+      </button>
+
+      @if (errorMessage) {
+        <p class="error-message">
+          {{ errorMessage }}
+        </p>
+      }
+    </section>
+
+    @if (uploadedDocument) {
+      <section class="document-result">
+        <div class="success-title">
+          <span>✅</span>
+          <h2>Document ready</h2>
+        </div>
+
+        <div class="document-details">
+          <div>
+            <span>File</span>
+            <strong>
+              {{ uploadedDocument.fileName }}
+            </strong>
+          </div>
+
+          <div>
+            <span>Pages</span>
+            <strong>
+              {{ uploadedDocument.totalPages }}
+            </strong>
+          </div>
+
+          <div>
+            <span>Chunks</span>
+            <strong>
+              {{ uploadedDocument.totalChunks }}
+            </strong>
+          </div>
+
+          <div>
+            <span>Status</span>
+            <strong>
+              {{ uploadedDocument.status }}
+            </strong>
+          </div>
+        </div>
+      </section>
+
+      <section class="chat-section">
+        <div class="chat-header">
+          <div class="assistant-avatar">
+            AI
+          </div>
+
+          <div>
+            <h2>Document Assistant</h2>
+            <span>Online</span>
+          </div>
+        </div>
+
+        <div class="messages-container">
+          @for (message of messages; track message.id) {
+            <div
+              class="message-row"
+              [class.user-row]="message.role === 'user'"
+              [class.assistant-row]="message.role === 'assistant'"
+            >
+              @if (message.role === 'assistant') {
+                <div class="message-avatar">
+                  AI
+                </div>
+              }
+
+              <div
+                class="message-bubble"
+                [class.user-message]="message.role === 'user'"
+                [class.assistant-message]="message.role === 'assistant'"
+              >
+                <p>{{ message.content }}</p>
+
+                @if (
+                  message.sources &&
+                  message.sources.length > 0
+                ) {
+                  <div class="message-sources">
+                    @for (
+                      source of message.sources;
+                      track source.chunkIndex
+                    ) {
+                      <span>
+                        📖 Page {{ source.pageNumber }}
+                        ·
+                        Score
+                        {{
+                          source.similarityScore
+                            | number:'1.2-2'
+                        }}
+                      </span>
+                    }
+                  </div>
+                }
+              </div>
+            </div>
+          }
+
+          @if (isAsking) {
+            <div class="message-row assistant-row">
+              <div class="message-avatar">
+                AI
+              </div>
+
+              <div
+                class="message-bubble assistant-message typing"
+              >
+                <span></span>
+                <span></span>
+                <span></span>
+              </div>
+            </div>
+          }
+        </div>
+
+        @if (questionError) {
+          <p class="error-message">
+            {{ questionError }}
+          </p>
+        }
+
+        <div class="message-input-area">
+          <input
+            type="text"
+            placeholder="Ask something about this document..."
+            [value]="question"
+            [disabled]="isAsking"
+            (input)="onQuestionInput($event)"
+            (keydown.enter)="askQuestion()"
+          />
+
+          <button
+            type="button"
+            class="send-button"
+            title="Send question"
+            [disabled]="isAsking || !question.trim()"
+            (click)="askQuestion()"
+          >
+            ➤
+          </button>
+        </div>
+      </section>
+    }
+  </section>
+</main>

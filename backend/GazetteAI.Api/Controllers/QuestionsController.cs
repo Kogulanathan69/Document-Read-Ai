@@ -1,0 +1,546 @@
+using GazetteAI.Application.Documents.Interfaces;
+using GazetteAI.Application.Documents.Models;
+using GazetteAI.Domain.Entities;
+using GazetteAI.Infrastructure.Data;
+using Microsoft.AspNetCore.Mvc;
+using Microsoft.EntityFrameworkCore;
+
+namespace GazetteAI.Api.Controllers;
+
+[ApiController]
+[Route("api/[controller]")]
+public sealed class QuestionsController : ControllerBase
+{
+    private readonly AppDbContext _dbContext;
+    private readonly IEmbeddingService _embeddingService;
+    private readonly IChatCompletionService _chatService;
+    private readonly ILogger<QuestionsController> _logger;
+
+    public QuestionsController(
+        AppDbContext dbContext,
+        IEmbeddingService embeddingService,
+        IChatCompletionService chatService,
+        ILogger<QuestionsController> logger)
+    {
+        _dbContext = dbContext;
+        _embeddingService = embeddingService;
+        _chatService = chatService;
+        _logger = logger;
+    }
+
+    [HttpPost("ask")]
+    public async Task<IActionResult> AskQuestion(
+        [FromBody] AskDocumentRequest request,
+        CancellationToken cancellationToken)
+    {
+        var validationResult =
+            ValidateRequest(request);
+
+        if (validationResult is not null)
+        {
+            return BadRequest(new
+            {
+                message = validationResult
+            });
+        }
+
+        var normalizedQuestion =
+            request.Question.Trim();
+
+        try
+        {
+            var document =
+                await _dbContext.Documents
+                    .AsNoTracking()
+                    .FirstOrDefaultAsync(
+                        item =>
+                            item.Id ==
+                                request.DocumentId &&
+                            item.UserId ==
+                                request.UserId,
+                        cancellationToken);
+
+            if (document is null)
+            {
+                return NotFound(new
+                {
+                    message =
+                        "Document was not found for this user."
+                });
+            }
+
+            var conversationId =
+                request.ConversationId.HasValue &&
+                request.ConversationId.Value != Guid.Empty
+                    ? request.ConversationId.Value
+                    : Guid.NewGuid();
+
+            /*
+             * Latest 12 messages மட்டும் எடுத்தால்
+             * Groq token usage குறையும்.
+             */
+            var storedHistory =
+                await _dbContext.ChatMessages
+                    .AsNoTracking()
+                    .Where(message =>
+                        message.ConversationId ==
+                            conversationId &&
+                        message.UserId ==
+                            request.UserId &&
+                        message.DocumentId ==
+                            request.DocumentId)
+                    .OrderByDescending(message =>
+                        message.CreatedAt)
+                    .Take(12)
+                    .ToListAsync(cancellationToken);
+
+            /*
+             * Database query newest-to-oldest order-ல்
+             * வந்ததால் conversation order-க்கு reverse.
+             */
+            storedHistory.Reverse();
+
+            var chatHistory = storedHistory
+                .Select(message =>
+                    new ChatHistoryMessage(
+                        message.Role,
+                        message.Content))
+                .ToList();
+
+            /*
+             * Language, writing style, follow-up,
+             * clarification, translation மற்றும்
+             * standalone search question அனைத்தையும்
+             * ஒரே Groq call analyse செய்யும்.
+             */
+            var analysis =
+                await _chatService
+                    .AnalyzeConversationAsync(
+                        normalizedQuestion,
+                        chatHistory,
+                        cancellationToken);
+
+            var searchQuestion =
+                string.IsNullOrWhiteSpace(
+                    analysis.SearchQuestion)
+                    ? normalizedQuestion
+                    : analysis.SearchQuestion.Trim();
+
+            /*
+             * Clarification அல்லது translation request-க்கு
+             * analysis search question உருவாக்க முடியாத
+             * fallback situation-ல் previous user message
+             * பயன்படுத்தப்படும்.
+             */
+            if ((analysis.IsClarification ||
+                 analysis.IsTranslationRequest) &&
+                IsSameText(
+                    searchQuestion,
+                    normalizedQuestion))
+            {
+                var previousUserMessage =
+                    storedHistory
+                        .LastOrDefault(message =>
+                            message.Role.Equals(
+                                "User",
+                                StringComparison
+                                    .OrdinalIgnoreCase))
+                        ?.Content;
+
+                if (!string.IsNullOrWhiteSpace(
+                        previousUserMessage))
+                {
+                    searchQuestion =
+                        previousUserMessage.Trim();
+                }
+            }
+
+            var chunks =
+                await _dbContext.DocumentChunks
+                    .AsNoTracking()
+                    .Where(chunk =>
+                        chunk.DocumentId ==
+                            request.DocumentId &&
+                        chunk.UserId ==
+                            request.UserId)
+                    .ToListAsync(cancellationToken);
+
+            if (chunks.Count == 0)
+            {
+                return BadRequest(new
+                {
+                    message =
+                        "This document does not contain " +
+                        "searchable text."
+                });
+            }
+
+            /*
+             * nomic-embed-text-v2-moe model-க்கு
+             * question embedding search_query prefix-உடன்
+             * உருவாக்கப்படும்.
+             */
+            var questionEmbedding =
+                await _embeddingService
+                    .GenerateEmbeddingAsync(
+                        $"search_query: {searchQuestion}",
+                        cancellationToken);
+
+            var relevantChunks = chunks
+                .Select(chunk => new
+                {
+                    Chunk = chunk,
+
+                    Score =
+                        CalculateCosineSimilarity(
+                            questionEmbedding,
+                            chunk.Embedding)
+                })
+                .OrderByDescending(item =>
+                    item.Score)
+                .Take(4)
+                .ToList();
+
+            var contextChunks = relevantChunks
+                .Select(item =>
+                    $"[Page " +
+                    $"{item.Chunk.PageNumber}]\n" +
+                    item.Chunk.Content)
+                .ToList();
+
+            /*
+             * Final answer:
+             *
+             * - original latest user message
+             * - relevant document chunks
+             * - previous chat history
+             * - multilingual conversation analysis
+             *
+             * அனைத்தையும் பயன்படுத்தி உருவாக்கப்படும்.
+             */
+            var answer =
+                await _chatService
+                    .GenerateAnswerAsync(
+                        searchQuestion,
+                        contextChunks,
+                        chatHistory,
+                        analysis,
+                        cancellationToken);
+
+            if (string.IsNullOrWhiteSpace(answer))
+            {
+                return StatusCode(
+                    StatusCodes
+                        .Status503ServiceUnavailable,
+                    new
+                    {
+                        message =
+                            "The AI service did not " +
+                            "return an answer. " +
+                            "Please try again."
+                    });
+            }
+
+            var currentTime =
+                DateTime.UtcNow;
+
+            var userMessage =
+                new ChatMessage
+                {
+                    Id = Guid.NewGuid(),
+
+                    ConversationId =
+                        conversationId,
+
+                    UserId =
+                        request.UserId,
+
+                    DocumentId =
+                        request.DocumentId,
+
+                    Role = "User",
+
+                    /*
+                     * Database-ல் original user message
+                     * மட்டும் save செய்யப்படும்.
+                     */
+                    Content =
+                        normalizedQuestion,
+
+                    CreatedAt =
+                        currentTime
+                };
+
+            var assistantMessage =
+                new ChatMessage
+                {
+                    Id = Guid.NewGuid(),
+
+                    ConversationId =
+                        conversationId,
+
+                    UserId =
+                        request.UserId,
+
+                    DocumentId =
+                        request.DocumentId,
+
+                    Role = "Assistant",
+
+                    Content =
+                        answer.Trim(),
+
+                    CreatedAt =
+                        currentTime.AddMilliseconds(1)
+                };
+
+            _dbContext.ChatMessages.AddRange(
+                userMessage,
+                assistantMessage);
+
+            await _dbContext.SaveChangesAsync(
+                cancellationToken);
+
+            /*
+             * ஒரே page-ல் பல chunks இருந்தாலும்
+             * frontend source list-ல் அந்த page
+             * ஒருமுறை மட்டும் வரும்.
+             */
+            var sources = relevantChunks
+                .GroupBy(item =>
+                    item.Chunk.PageNumber)
+                .Select(group =>
+                {
+                    var bestMatch = group
+                        .OrderByDescending(item =>
+                            item.Score)
+                        .First();
+
+                    return new
+                    {
+                        pageNumber =
+                            bestMatch
+                                .Chunk
+                                .PageNumber,
+
+                        chunkIndex =
+                            bestMatch
+                                .Chunk
+                                .ChunkIndex,
+
+                        similarityScore =
+                            Math.Round(
+                                bestMatch.Score,
+                                4)
+                    };
+                })
+                .OrderBy(source =>
+                    source.pageNumber)
+                .ToList();
+
+            return Ok(new
+            {
+                conversationId,
+
+                documentId =
+                    document.Id,
+
+                fileName =
+                    document.FileName,
+
+                question =
+                    normalizedQuestion,
+
+                searchQuestion,
+
+                detectedLanguage =
+                    analysis.DetectedLanguage,
+
+                writingStyle =
+                    analysis.WritingStyle,
+
+                responseInstruction =
+                    analysis.ResponseInstruction,
+
+                isFollowUp =
+                    analysis.IsFollowUp,
+
+                clarificationRequest =
+                    analysis.IsClarification,
+
+                translationRequest =
+                    analysis.IsTranslationRequest,
+
+                answer =
+                    answer.Trim(),
+
+                sources
+            });
+        }
+        catch (OperationCanceledException)
+        {
+            return StatusCode(
+                StatusCodes.Status408RequestTimeout,
+                new
+                {
+                    message =
+                        "The request was cancelled " +
+                        "or took too long."
+                });
+        }
+        catch (HttpRequestException exception)
+        {
+            _logger.LogError(
+                exception,
+                "External AI service connection failed.");
+
+            return StatusCode(
+                StatusCodes
+                    .Status503ServiceUnavailable,
+                new
+                {
+                    message =
+                        "The AI service is temporarily " +
+                        "unavailable. Please try again."
+                });
+        }
+        catch (InvalidOperationException exception)
+        {
+            _logger.LogError(
+                exception,
+                "AI service operation failed.");
+
+            return StatusCode(
+                StatusCodes
+                    .Status503ServiceUnavailable,
+                new
+                {
+                    message =
+                        "The AI service could not generate " +
+                        "an answer. Please try again."
+                });
+        }
+        catch (DbUpdateException exception)
+        {
+            _logger.LogError(
+                exception,
+                "Chat message database save failed.");
+
+            return StatusCode(
+                StatusCodes
+                    .Status500InternalServerError,
+                new
+                {
+                    message =
+                        "The answer was generated, but " +
+                        "the conversation could not be saved."
+                });
+        }
+        catch (Exception exception)
+        {
+            _logger.LogError(
+                exception,
+                "Question answering failed.");
+
+            return StatusCode(
+                StatusCodes
+                    .Status500InternalServerError,
+                new
+                {
+                    message =
+                        "Could not generate an answer. " +
+                        "Please try again."
+                });
+        }
+    }
+
+    private static string? ValidateRequest(
+        AskDocumentRequest request)
+    {
+        if (request.UserId == Guid.Empty)
+        {
+            return "Valid userId is required.";
+        }
+
+        if (request.DocumentId == Guid.Empty)
+        {
+            return "Valid documentId is required.";
+        }
+
+        if (string.IsNullOrWhiteSpace(
+                request.Question))
+        {
+            return "Question is required.";
+        }
+
+        if (request.Question.Length > 4000)
+        {
+            return
+                "Question cannot exceed 4000 characters.";
+        }
+
+        return null;
+    }
+
+    private static bool IsSameText(
+        string first,
+        string second)
+    {
+        return string.Equals(
+            first.Trim(),
+            second.Trim(),
+            StringComparison.OrdinalIgnoreCase);
+    }
+
+    private static double
+        CalculateCosineSimilarity(
+            float[] first,
+            float[] second)
+    {
+        if (first.Length == 0 ||
+            second.Length == 0 ||
+            first.Length != second.Length)
+        {
+            return 0;
+        }
+
+        double dotProduct = 0;
+        double firstMagnitude = 0;
+        double secondMagnitude = 0;
+
+        for (var index = 0;
+             index < first.Length;
+             index++)
+        {
+            dotProduct +=
+                first[index] *
+                second[index];
+
+            firstMagnitude +=
+                first[index] *
+                first[index];
+
+            secondMagnitude +=
+                second[index] *
+                second[index];
+        }
+
+        if (firstMagnitude == 0 ||
+            secondMagnitude == 0)
+        {
+            return 0;
+        }
+
+        return dotProduct /
+               (
+                   Math.Sqrt(firstMagnitude) *
+                   Math.Sqrt(secondMagnitude)
+               );
+    }
+}
+
+public sealed record AskDocumentRequest(
+    Guid UserId,
+    Guid DocumentId,
+    string Question,
+    Guid? ConversationId);

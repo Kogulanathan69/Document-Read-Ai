@@ -1,0 +1,6 @@
+<Solution>
+  <Project Path="GazetteAI.Api/GazetteAI.Api.csproj" />
+  <Project Path="GazetteAI.Application/GazetteAI.Application.csproj" />
+  <Project Path="GazetteAI.Domain/GazetteAI.Domain.csproj" />
+  <Project Path="GazetteAI.Infrastructure/GazetteAI.Infrastructure.csproj" />
+</Solution>

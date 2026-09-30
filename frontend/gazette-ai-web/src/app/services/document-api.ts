@@ -77,7 +77,7 @@ export class DocumentApi {
   private readonly http = inject(HttpClient);
 
   private readonly apiBaseUrl =
-    'http://localhost:5000/api';
+    'http://localhost:5114/api';
 
   uploadDocument(
     file: File,

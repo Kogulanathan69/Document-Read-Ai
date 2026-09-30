@@ -1,0 +1,293 @@
+:host {
+  display: block;
+  min-height: 100vh;
+  color: #f8fafc;
+}
+
+* { box-sizing: border-box; }
+
+.auth-page {
+  display: grid;
+  min-height: 100vh;
+  grid-template-columns: minmax(360px, 0.9fr) minmax(480px, 1.1fr);
+  background: #090d19;
+}
+
+.brand-panel {
+  position: relative;
+  display: flex;
+  min-height: 100vh;
+  flex-direction: column;
+  justify-content: space-between;
+  padding: clamp(38px, 6vw, 82px);
+  overflow: hidden;
+  background:
+    radial-gradient(circle at 18% 15%, rgba(244, 180, 0, 0.24), transparent 27%),
+    radial-gradient(circle at 82% 78%, rgba(20, 184, 166, 0.18), transparent 30%),
+    linear-gradient(145deg, #161424 0%, #0b1020 50%, #101d24 100%);
+}
+
+.brand-panel::after {
+  position: absolute;
+  right: -140px;
+  bottom: -140px;
+  width: 430px;
+  height: 430px;
+  content: '';
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 50%;
+  box-shadow: 0 0 0 55px rgba(255, 255, 255, 0.025), 0 0 0 110px rgba(255, 255, 255, 0.015);
+}
+
+.brand-mark,
+.mobile-brand span {
+  display: grid;
+  width: 52px;
+  height: 52px;
+  place-items: center;
+  color: #111827;
+  font-size: 25px;
+  font-weight: 900;
+  background: #f6bd35;
+  border-radius: 16px 16px 5px 16px;
+  box-shadow: 0 14px 35px rgba(246, 189, 53, 0.22);
+}
+
+.brand-copy {
+  position: relative;
+  z-index: 1;
+  max-width: 620px;
+}
+
+.eyebrow,
+.kicker {
+  color: #f6bd35;
+  font-size: 12px;
+  font-weight: 800;
+  letter-spacing: 0.16em;
+}
+
+.brand-copy h1 {
+  max-width: 600px;
+  margin: 18px 0;
+  font-size: clamp(42px, 5vw, 72px);
+  line-height: 1.02;
+  letter-spacing: -0.045em;
+}
+
+.brand-copy p {
+  max-width: 570px;
+  margin: 0;
+  color: #aeb9cc;
+  font-size: 17px;
+  line-height: 1.7;
+}
+
+.feature-list {
+  position: relative;
+  z-index: 1;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px 22px;
+  color: #cbd5e1;
+  font-size: 13px;
+}
+
+.form-panel {
+  display: grid;
+  min-height: 100vh;
+  padding: 36px;
+  place-items: center;
+  background: #f6f3eb;
+}
+
+.auth-card {
+  width: min(100%, 520px);
+  padding: clamp(26px, 4vw, 44px);
+  color: #18202d;
+  background: rgba(255, 255, 255, 0.94);
+  border: 1px solid rgba(15, 23, 42, 0.08);
+  border-radius: 28px;
+  box-shadow: 0 28px 80px rgba(41, 34, 22, 0.12);
+}
+
+.mobile-brand { display: none; }
+
+.auth-tabs {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 5px;
+  padding: 5px;
+  margin-bottom: 34px;
+  background: #eeece6;
+  border-radius: 13px;
+}
+
+.auth-tabs button {
+  padding: 11px;
+  color: #687080;
+  font-weight: 750;
+  cursor: pointer;
+  background: transparent;
+  border: 0;
+  border-radius: 9px;
+}
+
+.auth-tabs button.active {
+  color: #111827;
+  background: #fff;
+  box-shadow: 0 5px 16px rgba(15, 23, 42, 0.08);
+}
+
+.form-heading { margin-bottom: 28px; }
+.form-heading.centered { text-align: center; }
+
+.form-heading h2 {
+  margin: 9px 0 8px;
+  font-size: clamp(28px, 3vw, 36px);
+  letter-spacing: -0.035em;
+}
+
+.form-heading p {
+  margin: 0;
+  color: #697386;
+  line-height: 1.55;
+}
+
+.form-heading strong { color: #202938; }
+
+form { display: grid; gap: 18px; }
+
+.field {
+  display: grid;
+  gap: 8px;
+  color: #30394a;
+  font-size: 13px;
+  font-weight: 750;
+}
+
+.field input {
+  width: 100%;
+  min-width: 0;
+  padding: 14px 15px;
+  color: #111827;
+  font-size: 15px;
+  outline: none;
+  background: #fafaf8;
+  border: 1px solid #d9d9d3;
+  border-radius: 12px;
+  transition: 0.18s ease;
+}
+
+.field input:focus {
+  background: #fff;
+  border-color: #c99313;
+  box-shadow: 0 0 0 4px rgba(246, 189, 53, 0.16);
+}
+
+.field small { color: #c2413a; font-weight: 600; }
+.field small.hint { color: #788294; text-align: center; }
+
+.password-field { position: relative; }
+.password-field input { padding-right: 68px; }
+
+.password-field button {
+  position: absolute;
+  top: 50%;
+  right: 12px;
+  padding: 5px;
+  color: #8b6410;
+  font-size: 12px;
+  font-weight: 800;
+  cursor: pointer;
+  background: transparent;
+  border: 0;
+  transform: translateY(-50%);
+}
+
+.submit-button {
+  width: 100%;
+  padding: 15px 20px;
+  margin-top: 4px;
+  color: #14110a;
+  font-weight: 850;
+  cursor: pointer;
+  background: linear-gradient(135deg, #f7c84f, #e8a918);
+  border: 0;
+  border-radius: 12px;
+  box-shadow: 0 12px 24px rgba(221, 158, 10, 0.22);
+  transition: 0.18s ease;
+}
+
+.submit-button:hover:not(:disabled) { transform: translateY(-1px); }
+button:disabled { cursor: not-allowed; opacity: 0.55; }
+
+.verify-icon {
+  display: grid;
+  width: 68px;
+  height: 68px;
+  margin: 0 auto 22px;
+  place-items: center;
+  color: #1e293b;
+  font-size: 29px;
+  background: #fff4d0;
+  border-radius: 22px;
+}
+
+.otp-field input {
+  padding: 17px;
+  font-size: 28px;
+  font-weight: 800;
+  letter-spacing: 0.34em;
+  text-align: center;
+}
+
+.verify-actions {
+  display: flex;
+  justify-content: space-between;
+  gap: 16px;
+  margin-top: 22px;
+}
+
+.link-button {
+  padding: 6px 0;
+  color: #946a0c;
+  font-size: 13px;
+  font-weight: 800;
+  cursor: pointer;
+  background: transparent;
+  border: 0;
+}
+
+.notice {
+  padding: 12px 14px;
+  margin-top: 18px;
+  font-size: 13px;
+  line-height: 1.5;
+  border-radius: 11px;
+}
+
+.notice.error { color: #991b1b; background: #fef2f2; border: 1px solid #fecaca; }
+.notice.success { color: #166534; background: #f0fdf4; border: 1px solid #bbf7d0; }
+
+.security-note {
+  margin: 26px 0 0;
+  color: #9098a6;
+  font-size: 11px;
+  text-align: center;
+}
+
+@media (max-width: 900px) {
+  .auth-page { grid-template-columns: 1fr; }
+  .brand-panel { display: none; }
+  .form-panel { padding: 24px; background: linear-gradient(145deg, #111827, #151922); }
+  .mobile-brand { display: flex; align-items: center; gap: 12px; margin-bottom: 28px; }
+  .mobile-brand span { width: 42px; height: 42px; font-size: 20px; border-radius: 13px 13px 4px 13px; }
+  .mobile-brand strong { font-size: 19px; }
+}
+
+@media (max-width: 520px) {
+  .form-panel { padding: 12px; }
+  .auth-card { padding: 24px 19px; border-radius: 20px; }
+  .verify-actions { flex-direction: column; align-items: center; gap: 4px; }
+}

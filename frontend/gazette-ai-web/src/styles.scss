@@ -5,5 +5,12 @@ body {
 }
 
 body {
-  background: #f8fafc;
+  min-width: 320px;
+  background: #0b1020;
+  font-family: Inter, "Segoe UI", Arial, sans-serif;
+}
+
+button,
+input {
+  font: inherit;
 }

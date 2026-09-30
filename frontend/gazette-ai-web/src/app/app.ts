@@ -1,10 +1,10 @@
 import { Component } from '@angular/core';
-import { DocumentChat } from './pages/document-chat/document-chat';
+import { RouterOutlet } from '@angular/router';
 
 @Component({
   selector: 'app-root',
   standalone: true,
-  imports: [DocumentChat],
+  imports: [RouterOutlet],
   templateUrl: './app.html',
   styleUrl: './app.scss'
 })

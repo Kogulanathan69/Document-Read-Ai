@@ -1,6 +1,7 @@
 using GazetteAI.Application.Documents.Interfaces;
 using GazetteAI.Application.Documents.Models;
 using GazetteAI.Domain.Entities;
+using GazetteAI.Infrastructure.AI;
 using GazetteAI.Infrastructure.Data;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.EntityFrameworkCore;
@@ -14,17 +15,20 @@ public sealed class QuestionsController : ControllerBase
     private readonly AppDbContext _dbContext;
     private readonly IEmbeddingService _embeddingService;
     private readonly IChatCompletionService _chatService;
+    private readonly IWebSearchService _webSearchService;
     private readonly ILogger<QuestionsController> _logger;
 
     public QuestionsController(
         AppDbContext dbContext,
         IEmbeddingService embeddingService,
         IChatCompletionService chatService,
+        IWebSearchService webSearchService,
         ILogger<QuestionsController> logger)
     {
         _dbContext = dbContext;
         _embeddingService = embeddingService;
         _chatService = chatService;
+        _webSearchService = webSearchService;
         _logger = logger;
     }
 
@@ -163,6 +167,69 @@ public sealed class QuestionsController : ControllerBase
              */
             if (!analysis.RequiresDocumentSearch)
             {
+                if (analysis.ExternalPermissionGranted &&
+                    !string.IsNullOrWhiteSpace(
+                        analysis.ExternalQuestion))
+                {
+                    var externalQuestion =
+                        analysis.ExternalQuestion.Trim();
+
+                    var webResults =
+                        await _webSearchService.SearchAsync(
+                            externalQuestion,
+                            cancellationToken);
+
+                    var webAnswer =
+                        await _chatService
+                            .GenerateWebAnswerAsync(
+                                externalQuestion,
+                                webResults,
+                                analysis,
+                                cancellationToken);
+
+                    await SaveConversationMessagesAsync(
+                        conversationId,
+                        request.UserId,
+                        request.DocumentId,
+                        normalizedQuestion,
+                        webAnswer,
+                        cancellationToken);
+
+                    var webSources = webResults
+                        .Select(item => new
+                        {
+                            title = item.Title,
+                            url = item.Url
+                        })
+                        .ToList();
+
+                    return Ok(new
+                    {
+                        conversationId,
+                        documentId = document.Id,
+                        fileName = document.FileName,
+                        question = normalizedQuestion,
+                        searchQuestion = externalQuestion,
+                        intent = analysis.Intent,
+                        requiresDocumentSearch = false,
+                        detectedLanguage =
+                            analysis.DetectedLanguage,
+                        writingStyle = analysis.WritingStyle,
+                        responseInstruction =
+                            analysis.ResponseInstruction,
+                        isFollowUp = true,
+                        clarificationRequest = false,
+                        translationRequest = false,
+                        requiresExternalKnowledge = true,
+                        externalPermissionResponse = true,
+                        externalPermissionGranted = true,
+                        answerSource = "live-web",
+                        answer = webAnswer,
+                        sources = Array.Empty<object>(),
+                        webSources
+                    });
+                }
+
                 var directAnswer =
                     string.IsNullOrWhiteSpace(
                         analysis.DirectResponse)
@@ -217,6 +284,20 @@ public sealed class QuestionsController : ControllerBase
 
                     translationRequest =
                         false,
+
+                    requiresExternalKnowledge =
+                        analysis.RequiresExternalKnowledge,
+
+                    externalPermissionResponse =
+                        analysis.IsExternalPermissionResponse,
+
+                    externalPermissionGranted =
+                        analysis.ExternalPermissionGranted,
+
+                    answerSource =
+                        analysis.ExternalPermissionGranted
+                            ? "general-knowledge"
+                            : "assistant",
 
                     answer =
                         directAnswer,
@@ -312,6 +393,57 @@ public sealed class QuestionsController : ControllerBase
                     });
             }
 
+            /*
+             * The PDF retrieval stage could not ground an answer.
+             * Ask permission before using general AI knowledge.
+             * No PDF page source is returned for this response.
+             */
+            if (answer.Equals(
+                    GroqChatCompletionService
+                        .DocumentAnswerNotFoundMarker,
+                    StringComparison.Ordinal))
+            {
+                var permissionPrompt =
+                    BuildExternalPermissionPrompt(
+                        analysis.ResponseLanguage);
+
+                await SaveConversationMessagesAsync(
+                    conversationId,
+                    request.UserId,
+                    request.DocumentId,
+                    normalizedQuestion,
+                    permissionPrompt,
+                    cancellationToken);
+
+                return Ok(new
+                {
+                    conversationId,
+                    documentId = document.Id,
+                    fileName = document.FileName,
+                    question = normalizedQuestion,
+                    searchQuestion,
+                    intent = "GeneralQuestion",
+                    requiresDocumentSearch = false,
+                    detectedLanguage =
+                        analysis.DetectedLanguage,
+                    writingStyle =
+                        analysis.WritingStyle,
+                    responseInstruction =
+                        analysis.ResponseInstruction,
+                    isFollowUp = analysis.IsFollowUp,
+                    clarificationRequest =
+                        analysis.IsClarification,
+                    translationRequest =
+                        analysis.IsTranslationRequest,
+                    requiresExternalKnowledge = true,
+                    externalPermissionResponse = false,
+                    externalPermissionGranted = false,
+                    answerSource = "document-not-found",
+                    answer = permissionPrompt,
+                    sources = Array.Empty<object>()
+                });
+            }
+
             await SaveConversationMessagesAsync(
                 conversationId,
                 request.UserId,
@@ -395,6 +527,17 @@ public sealed class QuestionsController : ControllerBase
 
                 translationRequest =
                     analysis.IsTranslationRequest,
+
+                requiresExternalKnowledge =
+                    analysis.RequiresExternalKnowledge,
+
+                externalPermissionResponse =
+                    analysis.IsExternalPermissionResponse,
+
+                externalPermissionGranted =
+                    analysis.ExternalPermissionGranted,
+
+                answerSource = "document",
 
                 answer =
                     answer.Trim(),
@@ -547,6 +690,45 @@ public sealed class QuestionsController : ControllerBase
         }
 
         return null;
+    }
+
+    private static string BuildExternalPermissionPrompt(
+        string? language)
+    {
+        return language?
+            .Trim()
+            .ToLowerInvariant() switch
+        {
+            "tamil" =>
+                "இந்தத் தகவல் பதிவேற்றிய ஆவணத்தில் இல்லை. " +
+                "பொதுவான AI அறிவைப் பயன்படுத்தி பதில் சொல்லவா?",
+
+            "tanglish" =>
+                "Indha information uploaded document-la illa. " +
+                "General AI knowledge use panni answer sollava?",
+
+            "sinhala" =>
+                "මෙම තොරතුරු උඩුගත කළ ලේඛනයේ නැහැ. " +
+                "සාමාන්‍ය AI දැනුම භාවිතයෙන් පිළිතුරු දෙන්නද?",
+
+            "singlish" =>
+                "Me information uploaded document eke naha. " +
+                "General AI knowledge use karala answer karannada?",
+
+            "french" =>
+                "Cette information ne figure pas dans le document. " +
+                "Voulez-vous une réponse basée sur les " +
+                "connaissances générales de l’IA ?",
+
+            "hindi" =>
+                "यह जानकारी अपलोड किए गए दस्तावेज़ में नहीं है। " +
+                "क्या मैं सामान्य AI ज्ञान का उपयोग करके उत्तर दूँ?",
+
+            _ =>
+                "This information is not available in the " +
+                "uploaded document. Would you like an answer " +
+                "using general AI knowledge?"
+        };
     }
 
     private static bool IsSameText(

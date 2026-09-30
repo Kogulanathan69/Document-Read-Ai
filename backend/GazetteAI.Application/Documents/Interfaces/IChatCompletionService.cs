@@ -19,6 +19,9 @@ public interface IChatCompletionService
      * - IsFollowUp
      * - IsClarificationRequest
      * - IsTranslationRequest
+     * - RequiresExternalKnowledge
+     * - IsExternalPermissionResponse
+     * - ExternalPermissionGranted
      */
     Task<ConversationAnalysis> AnalyzeConversationAsync(
         string question,
@@ -30,14 +33,24 @@ public interface IChatCompletionService
      * retrieved document context பயன்படுத்தி
      * final answer உருவாக்கும்.
      *
-     * Greeting மற்றும் acknowledgement போன்ற
-     * direct-response messages-க்கு இந்த method
-     * call செய்யப்படாது.
+     * Greeting, acknowledgement, casual chat மற்றும்
+     * general-knowledge permission flow போன்ற direct-response
+     * messages-க்கு இந்த method call செய்யப்படாது.
      */
     Task<string> GenerateAnswerAsync(
         string question,
         IReadOnlyList<string> contextChunks,
         IReadOnlyList<ChatHistoryMessage> history,
+        ConversationAnalysis analysis,
+        CancellationToken cancellationToken = default);
+
+    /*
+     * Creates a current answer strictly from live web-search
+     * results after the user has granted permission.
+     */
+    Task<string> GenerateWebAnswerAsync(
+        string question,
+        IReadOnlyList<WebSearchResult> searchResults,
         ConversationAnalysis analysis,
         CancellationToken cancellationToken = default);
 }

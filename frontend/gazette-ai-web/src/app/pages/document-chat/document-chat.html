@@ -1,5 +1,22 @@
 <main class="page-container">
   <section class="document-card">
+    <nav class="account-bar">
+      <div class="account-profile">
+        <span class="account-avatar">
+          {{ currentUser()?.fullName?.charAt(0)?.toUpperCase() || 'U' }}
+        </span>
+
+        <div>
+          <strong>{{ currentUser()?.fullName }}</strong>
+          <small>{{ currentUser()?.email }}</small>
+        </div>
+      </div>
+
+      <button type="button" class="logout-button" (click)="logout()">
+        Sign out
+      </button>
+    </nav>
+
     <header class="header">
       <span class="logo">📄</span>
 
@@ -100,6 +117,15 @@
             <h2>Document Assistant</h2>
             <span>Online</span>
           </div>
+
+          <button
+            type="button"
+            class="new-chat-button"
+            title="Start new conversation"
+            (click)="startNewConversation()"
+          >
+            New chat
+          </button>
         </div>
 
         <div class="messages-container">

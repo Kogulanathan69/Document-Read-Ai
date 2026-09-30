@@ -1,0 +1,225 @@
+<main class="auth-page">
+  <section class="brand-panel">
+    <div class="brand-mark">G</div>
+
+    <div class="brand-copy">
+      <span class="eyebrow">YOUR DOCUMENT. YOUR ANSWERS.</span>
+      <h1>Turn every PDF into a conversation.</h1>
+      <p>
+        Upload English, Tamil or Sinhala documents and ask questions
+        naturally in the language you prefer.
+      </p>
+    </div>
+
+    <div class="feature-list">
+      <span>✓ OCR for scanned documents</span>
+      <span>✓ Answers grounded in your PDF</span>
+      <span>✓ Secure, private conversations</span>
+    </div>
+  </section>
+
+  <section class="form-panel">
+    <div class="auth-card">
+      <div class="mobile-brand">
+        <span>G</span>
+        <strong>GazetteAI</strong>
+      </div>
+
+      @if (view !== 'verify') {
+        <div class="auth-tabs" role="tablist">
+          <button
+            type="button"
+            [class.active]="view === 'login'"
+            (click)="switchView('login')"
+          >
+            Sign in
+          </button>
+
+          <button
+            type="button"
+            [class.active]="view === 'register'"
+            (click)="switchView('register')"
+          >
+            Create account
+          </button>
+        </div>
+      }
+
+      @if (view === 'login') {
+        <header class="form-heading">
+          <span class="kicker">WELCOME BACK</span>
+          <h2>Continue to GazetteAI</h2>
+          <p>Sign in to access your document workspace.</p>
+        </header>
+
+        <form [formGroup]="loginForm" (ngSubmit)="submitLogin()">
+          <label class="field">
+            <span>Email address</span>
+            <input
+              type="email"
+              formControlName="email"
+              autocomplete="email"
+              placeholder="you@example.com"
+            />
+            @if (loginForm.controls.email.touched && loginForm.controls.email.invalid) {
+              <small>Enter a valid email address.</small>
+            }
+          </label>
+
+          <label class="field">
+            <span>Password</span>
+            <div class="password-field">
+              <input
+                [type]="showPassword ? 'text' : 'password'"
+                formControlName="password"
+                autocomplete="current-password"
+                placeholder="Minimum 8 characters"
+              />
+              <button
+                type="button"
+                (click)="showPassword = !showPassword"
+                [attr.aria-label]="showPassword ? 'Hide password' : 'Show password'"
+              >
+                {{ showPassword ? 'Hide' : 'Show' }}
+              </button>
+            </div>
+            @if (loginForm.controls.password.touched && loginForm.controls.password.invalid) {
+              <small>Password must contain at least 8 characters.</small>
+            }
+          </label>
+
+          <button class="submit-button" type="submit" [disabled]="isSubmitting">
+            {{ isSubmitting ? 'Signing in...' : 'Sign in' }}
+          </button>
+        </form>
+      }
+
+      @if (view === 'register') {
+        <header class="form-heading">
+          <span class="kicker">GET STARTED</span>
+          <h2>Create your account</h2>
+          <p>Your documents and conversations stay linked to your account.</p>
+        </header>
+
+        <form [formGroup]="registerForm" (ngSubmit)="submitRegister()">
+          <label class="field">
+            <span>Full name</span>
+            <input
+              type="text"
+              formControlName="fullName"
+              autocomplete="name"
+              placeholder="Your full name"
+            />
+            @if (registerForm.controls.fullName.touched && registerForm.controls.fullName.invalid) {
+              <small>Enter at least 2 characters.</small>
+            }
+          </label>
+
+          <label class="field">
+            <span>Email address</span>
+            <input
+              type="email"
+              formControlName="email"
+              autocomplete="email"
+              placeholder="you@example.com"
+            />
+            @if (registerForm.controls.email.touched && registerForm.controls.email.invalid) {
+              <small>Enter a valid email address.</small>
+            }
+          </label>
+
+          <label class="field">
+            <span>Password</span>
+            <div class="password-field">
+              <input
+                [type]="showPassword ? 'text' : 'password'"
+                formControlName="password"
+                autocomplete="new-password"
+                placeholder="Minimum 8 characters"
+              />
+              <button type="button" (click)="showPassword = !showPassword">
+                {{ showPassword ? 'Hide' : 'Show' }}
+              </button>
+            </div>
+          </label>
+
+          <label class="field">
+            <span>Confirm password</span>
+            <input
+              [type]="showPassword ? 'text' : 'password'"
+              formControlName="confirmPassword"
+              autocomplete="new-password"
+              placeholder="Enter password again"
+            />
+          </label>
+
+          <button class="submit-button" type="submit" [disabled]="isSubmitting">
+            {{ isSubmitting ? 'Creating account...' : 'Create account' }}
+          </button>
+        </form>
+      }
+
+      @if (view === 'verify') {
+        <div class="verify-icon">✉</div>
+
+        <header class="form-heading centered">
+          <span class="kicker">EMAIL VERIFICATION</span>
+          <h2>Check your inbox</h2>
+          <p>
+            Enter the 6-digit code sent to
+            <strong>{{ pendingEmail }}</strong>
+          </p>
+        </header>
+
+        <form [formGroup]="verifyForm" (ngSubmit)="submitVerification()">
+          <label class="field otp-field">
+            <span>Verification code</span>
+            <input
+              type="text"
+              inputmode="numeric"
+              autocomplete="one-time-code"
+              maxlength="6"
+              formControlName="code"
+              placeholder="000000"
+              (input)="onOtpInput($event)"
+            />
+            <small class="hint">Verification starts automatically after 6 digits.</small>
+          </label>
+
+          <button class="submit-button" type="submit" [disabled]="isSubmitting">
+            {{ isSubmitting ? 'Verifying...' : 'Verify email' }}
+          </button>
+        </form>
+
+        <div class="verify-actions">
+          <button type="button" class="link-button" (click)="editEmail()">
+            Change email
+          </button>
+
+          <button
+            type="button"
+            class="link-button"
+            [disabled]="resendSeconds > 0 || isSubmitting"
+            (click)="resendOtp()"
+          >
+            @if (resendSeconds > 0) {
+              Resend in {{ resendSeconds }}s
+            } @else {
+              Resend code
+            }
+          </button>
+        </div>
+      }
+
+      @if (successMessage) {
+        <div class="notice success" role="status">{{ successMessage }}</div>
+      }
+
+      @if (errorMessage) {
+        <div class="notice error" role="alert">{{ errorMessage }}</div>
+      }
+
+      <p class="security-note">🔒 Protected with secure password hashing and JWT authentication.</p>
+    </div>
+  </section>
+</main>

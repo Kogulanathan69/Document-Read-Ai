@@ -11,6 +11,9 @@ namespace GazetteAI.Infrastructure.AI;
 public sealed class GroqChatCompletionService
     : IChatCompletionService
 {
+    public const string DocumentAnswerNotFoundMarker =
+        "[[DOCUMENT_ANSWER_NOT_FOUND]]";
+
     private readonly HttpClient _httpClient;
     private readonly GroqOptions _options;
 
@@ -55,6 +58,162 @@ public sealed class GroqChatCompletionService
         var loweredQuestion =
             normalizedQuestion.ToLowerInvariant();
 
+        var pendingGeneralQuestion =
+            FindPendingGeneralQuestion(history);
+
+        var hasPendingGeneralPermission =
+            !string.IsNullOrWhiteSpace(
+                pendingGeneralQuestion);
+
+        var isPermissionReply =
+            IsGeneralPermissionReply(loweredQuestion);
+
+        var followsLiveWebAnswer =
+            FollowsLiveWebAnswer(history);
+
+        /*
+         * Permission decisions are handled deterministically.
+         * The model must never guess that an unclear message
+         * such as "h" means yes or no.
+         */
+        if (hasPendingGeneralPermission &&
+            isPermissionReply)
+        {
+            var responseLanguage =
+                DetectResponseLanguage(
+                    normalizedQuestion);
+
+            if (IsNegativePermissionReply(
+                    loweredQuestion))
+            {
+                return CreatePermissionDecisionAnalysis(
+                    granted: false,
+                    responseLanguage:
+                        responseLanguage,
+                    directResponse:
+                        BuildPermissionDeclinedResponse(
+                            responseLanguage));
+            }
+
+            return CreatePermissionDecisionAnalysis(
+                granted: true,
+                responseLanguage:
+                    responseLanguage,
+                directResponse: string.Empty,
+                externalQuestion:
+                    pendingGeneralQuestion!);
+        }
+
+        if (hasPendingGeneralPermission &&
+            IsUnclearPermissionReply(
+                loweredQuestion))
+        {
+            var responseLanguage =
+                DetectResponseLanguage(
+                    normalizedQuestion);
+
+            return new ConversationAnalysis
+            {
+                Intent = "CasualConversation",
+                RequiresDocumentSearch = false,
+                DirectResponse =
+                    BuildPermissionReminder(
+                        responseLanguage),
+                ResponseLanguage = responseLanguage,
+                ResponseStyle = "standard",
+                RequiresExternalKnowledge = true
+            };
+        }
+
+        /*
+         * Questions about GazetteAI itself must be answered from
+         * known application capabilities. They are never document
+         * questions and must never be sent to Tavily.
+         */
+        if (IsAssistantCapabilityQuestion(loweredQuestion))
+        {
+            var responseLanguage =
+                DetectResponseLanguage(normalizedQuestion);
+
+            return new ConversationAnalysis
+            {
+                Intent = "CasualConversation",
+                RequiresDocumentSearch = false,
+                DirectResponse = BuildCapabilityResponse(
+                    normalizedQuestion,
+                    responseLanguage),
+                ResponseLanguage = responseLanguage,
+                ResponseStyle = "standard"
+            };
+        }
+
+        /*
+         * A language-only message immediately after a live-web
+         * answer means "translate that answer". It must not be
+         * searched as a new phrase such as "tamil la sollu".
+         */
+        if (followsLiveWebAnswer &&
+            IsLanguageCommand(loweredQuestion))
+        {
+            var previousAnswer =
+                FindLatestAssistantAnswer(history);
+
+            var responseLanguage =
+                DetectResponseLanguage(normalizedQuestion);
+
+            var convertedAnswer =
+                await ConvertExistingAnswerAsync(
+                    previousAnswer,
+                    responseLanguage,
+                    cancellationToken);
+
+            return new ConversationAnalysis
+            {
+                Intent = "Translation",
+                RequiresDocumentSearch = false,
+                DirectResponse = convertedAnswer,
+                ResponseLanguage = responseLanguage,
+                ResponseStyle = "standard",
+                IsFollowUp = true,
+                IsTranslationRequest = true,
+                RequiresExternalKnowledge = true
+            };
+        }
+
+        /*
+         * Short messages after a live-web answer are treated as
+         * follow-ups to that web question. Groq rewrites them into
+         * one complete query before Tavily is called again.
+         */
+        if (followsLiveWebAnswer &&
+            !IsGreeting(loweredQuestion) &&
+            !IsAcknowledgement(loweredQuestion) &&
+            !IsCasualConversation(loweredQuestion))
+        {
+            var externalQuestion =
+                await RewriteExternalFollowUpAsync(
+                    normalizedQuestion,
+                    history,
+                    cancellationToken);
+
+            return new ConversationAnalysis
+            {
+                Intent = "GeneralPermissionGranted",
+                RequiresDocumentSearch = false,
+                SearchQuestion = string.Empty,
+                ResponseLanguage =
+                    DetectResponseLanguage(
+                        normalizedQuestion,
+                        FindPreviousResponseLanguage(history)),
+                ResponseStyle = "standard",
+                IsFollowUp = true,
+                RequiresExternalKnowledge = true,
+                IsExternalPermissionResponse = true,
+                ExternalPermissionGranted = true,
+                ExternalQuestion = externalQuestion
+            };
+        }
+
         /*
          * Language-change and clarification messages can be
          * understood locally. This avoids an unnecessary Groq
@@ -87,7 +246,10 @@ public sealed class GroqChatCompletionService
               "responseStyle": "standard",
               "isClarificationRequest": false,
               "isTranslationRequest": false,
-              "isFollowUp": false
+              "isFollowUp": false,
+              "requiresExternalKnowledge": false,
+              "isExternalPermissionResponse": false,
+              "externalPermissionGranted": false
             }
 
             Rules:
@@ -95,49 +257,84 @@ public sealed class GroqChatCompletionService
             1. intent must be exactly one of:
                DocumentQuestion, DocumentFollowUp,
                Clarification, Translation, Acknowledgement,
-               Greeting or OutOfScope.
+               Greeting, CasualConversation, GeneralQuestion,
+               GeneralPermissionGranted or GeneralPermissionDenied.
 
-            2. requiresDocumentSearch must be false only for
-               Greeting and Acknowledgement. It must be true
-               for document questions, follow-ups,
-               clarifications and translations.
+            2. requiresDocumentSearch is true only for
+               DocumentQuestion, DocumentFollowUp,
+               Clarification and Translation.
 
-            3. For Greeting or Acknowledgement, put a short,
-               friendly reply in directResponse. For every
-               other intent, directResponse must be empty.
+            3. CasualConversation is friendly social chat such
+               as "how are you?" or "what about you?". Reply
+               naturally in directResponse without searching
+               the document.
 
-            4. searchQuestion must be a complete standalone
+            4. DOCUMENT-FIRST RULE: An uploaded document is
+               active. Classify every substantive factual,
+               explanatory, comparison, summary, recommendation,
+               scope or information request as DocumentQuestion
+               or DocumentFollowUp first. Do this even when the
+               question could also be answered from general
+               knowledge. The retrieval stage, not this analysis
+               stage, decides whether the document contains the
+               answer.
+
+            5. Use GeneralQuestion only when the user explicitly
+               asks for an answer outside the document, from
+               general knowledge, or from the internet. Do not
+               choose GeneralQuestion merely because the topic
+               appears broad or unfamiliar.
+
+            6. If PENDING GENERAL QUESTION is not "(none)",
+               interpret yes, okay, sure, search, tell me, or
+               equivalent multilingual replies as
+               GeneralPermissionGranted. Answer the pending
+               question shown there helpfully in directResponse.
+               Clearly say when current/live information cannot
+               be verified. Do not claim to browse the web.
+
+            7. Interpret no, don't, வேண்டாம், epa or equivalent
+               replies as GeneralPermissionDenied and respond
+               politely in directResponse.
+
+            8. For Greeting, Acknowledgement,
+               CasualConversation, GeneralQuestion,
+               GeneralPermissionGranted and
+               GeneralPermissionDenied, directResponse must be
+               a complete friendly response.
+
+            9. searchQuestion must be a complete standalone
                question used to search the uploaded document.
 
-            5. Use conversation history only to understand
+            10. Use conversation history to understand
                follow-up references.
 
-            6. Messages such as "what is its scope?",
+            11. Messages such as "what is its scope?",
                "what does it do?" and "mokad karanne?" are
                document follow-ups when history contains a
                document topic. Rewrite them as standalone
                document questions.
 
-            7. Messages such as "okay", "hari", "hri okay",
+            12. Messages such as "okay", "hari", "hri okay",
                "thanks" and "got it" are acknowledgements,
                not document questions.
 
-            8. Never answer document questions during analysis.
+            13. Never answer document questions during analysis.
 
-            9. Detect the language requested by the latest user.
+            14. Detect the language requested by the latest user.
 
-            10. Tanglish means spoken Tamil written using
+            15. Tanglish means spoken Tamil written using
                Latin letters.
 
-            11. Singlish means spoken Sinhala written using
+            16. Singlish means spoken Sinhala written using
                Latin letters.
 
-            12. Do not mix Tanglish and Singlish.
+            17. Do not mix Tanglish and Singlish.
 
-            13. responseStyle must be:
+            18. responseStyle must be:
                standard, simple or detailed.
 
-            14. Return JSON only.
+            19. Return JSON only.
                Do not use Markdown.
             """;
 
@@ -145,6 +342,10 @@ public sealed class GroqChatCompletionService
             CONVERSATION HISTORY:
 
             {formattedHistory}
+
+            PENDING GENERAL QUESTION:
+
+            {pendingGeneralQuestion ?? "(none)"}
 
             LATEST USER MESSAGE:
 
@@ -233,8 +434,7 @@ public sealed class GroqChatCompletionService
 
         if (contextChunks.Count == 0)
         {
-            return BuildNotFoundMessage(
-                responseLanguage);
+            return DocumentAnswerNotFoundMarker;
         }
 
         var context = string.Join(
@@ -303,8 +503,7 @@ public sealed class GroqChatCompletionService
                 "__NOT_FOUND__",
                 StringComparison.OrdinalIgnoreCase))
         {
-            return BuildNotFoundMessage(
-                responseLanguage);
+            return DocumentAnswerNotFoundMarker;
         }
 
         if (responseLanguage.Equals(
@@ -413,6 +612,259 @@ public sealed class GroqChatCompletionService
             temperature: 0,
             maxCompletionTokens: 300,
             cancellationToken);
+    }
+
+    public async Task<string> GenerateWebAnswerAsync(
+        string question,
+        IReadOnlyList<WebSearchResult> searchResults,
+        ConversationAnalysis analysis,
+        CancellationToken cancellationToken = default)
+    {
+        if (string.IsNullOrWhiteSpace(question))
+        {
+            throw new ArgumentException(
+                "Question cannot be empty.",
+                nameof(question));
+        }
+
+        if (searchResults.Count == 0)
+        {
+            return BuildWebSearchUnavailableResponse(
+                analysis.ResponseLanguage);
+        }
+
+        var languageInstruction =
+            BuildLanguageInstruction(
+                analysis.ResponseLanguage);
+
+        var currentDate = DateTime.UtcNow
+            .ToString("yyyy-MM-dd");
+
+        var sources = string.Join(
+            "\n\n---\n\n",
+            searchResults.Select((item, index) =>
+                $"SOURCE {index + 1}\n" +
+                $"Title: {item.Title}\n" +
+                $"URL: {item.Url}\n" +
+                $"Content: {item.Content}"));
+
+        var answer = await SendChatAsync(
+            [
+                new GroqMessage
+                {
+                    Role = "system",
+                    Content = $"""
+                        You are GazetteAI's live-web answer
+                        assistant. The user explicitly allowed an
+                        answer outside the uploaded document.
+
+                        Answer only from the supplied LIVE WEB
+                        SOURCES. Never add facts from memory.
+                        Today's date is {currentDate}. For current
+                        office holders, laws, prices, schedules and
+                        other time-sensitive facts, reject older
+                        contradictory claims and use the newest
+                        clearly dated authoritative evidence.
+                        Prefer official and authoritative sources
+                        when sources disagree. If the sources do
+                        not support an answer, say that reliable
+                        current information was not found.
+
+                        Keep names, dates and official titles exact.
+                        Do not claim the answer came from the PDF.
+                        Do not print raw URLs because the app shows
+                        source links separately. Do not use HTML.
+
+                        {languageInstruction}
+                        """
+                },
+                new GroqMessage
+                {
+                    Role = "user",
+                    Content = $"""
+                        QUESTION:
+                        {question.Trim()}
+
+                        LIVE WEB SOURCES:
+                        {sources}
+                        """
+                }
+            ],
+            temperature: 0,
+            maxCompletionTokens: 700,
+            cancellationToken);
+
+        return CleanAnswer(answer);
+    }
+
+    private async Task<string> ConvertExistingAnswerAsync(
+        string existingAnswer,
+        string responseLanguage,
+        CancellationToken cancellationToken)
+    {
+        if (string.IsNullOrWhiteSpace(existingAnswer))
+        {
+            return BuildWebSearchUnavailableResponse(
+                responseLanguage);
+        }
+
+        var languageInstruction =
+            BuildLanguageInstruction(responseLanguage);
+
+        var converted = await SendChatAsync(
+            [
+                new GroqMessage
+                {
+                    Role = "system",
+                    Content = $"""
+                        Convert the supplied answer into the
+                        requested language. Preserve every fact,
+                        name, title and date exactly. Do not add,
+                        remove, correct or search for information.
+                        Return only the converted answer.
+
+                        {languageInstruction}
+                        """
+                },
+                new GroqMessage
+                {
+                    Role = "user",
+                    Content = existingAnswer
+                }
+            ],
+            temperature: 0,
+            maxCompletionTokens: 700,
+            cancellationToken);
+
+        return CleanAnswer(converted);
+    }
+
+    private async Task<string> RewriteExternalFollowUpAsync(
+        string latestQuestion,
+        IReadOnlyList<ChatHistoryMessage> history,
+        CancellationToken cancellationToken)
+    {
+        var recentHistory = string.Join(
+            "\n",
+            history.TakeLast(6).Select(message =>
+                $"{message.Role}: {message.Content}"));
+
+        var rewritten = await SendChatAsync(
+            [
+                new GroqMessage
+                {
+                    Role = "system",
+                    Content = """
+                        Rewrite the latest user message as one
+                        complete standalone web-search question.
+                        Resolve pronouns, missing subjects, years
+                        and short follow-up phrases from the recent
+                        conversation. Preserve the user's meaning.
+                        Do not answer the question. Return only the
+                        rewritten question with no quotation marks.
+                        """
+                },
+                new GroqMessage
+                {
+                    Role = "user",
+                    Content = $"""
+                        RECENT CONVERSATION:
+                        {recentHistory}
+
+                        LATEST USER MESSAGE:
+                        {latestQuestion}
+                        """
+                }
+            ],
+            temperature: 0,
+            maxCompletionTokens: 120,
+            cancellationToken);
+
+        var cleaned = CleanAnswer(rewritten);
+
+        return string.IsNullOrWhiteSpace(cleaned)
+            ? latestQuestion.Trim()
+            : cleaned;
+    }
+
+    private static bool FollowsLiveWebAnswer(
+        IReadOnlyList<ChatHistoryMessage> history)
+    {
+        var lastAssistantIndex = -1;
+
+        for (var index = history.Count - 1;
+             index >= 0;
+             index--)
+        {
+            if (history[index].Role.Equals(
+                    "assistant",
+                    StringComparison.OrdinalIgnoreCase))
+            {
+                lastAssistantIndex = index;
+                break;
+            }
+        }
+
+        if (lastAssistantIndex < 0)
+        {
+            return false;
+        }
+
+        for (var index = lastAssistantIndex - 1;
+             index >= 0;
+             index--)
+        {
+            if (!history[index].Role.Equals(
+                    "user",
+                    StringComparison.OrdinalIgnoreCase))
+            {
+                continue;
+            }
+
+            if (!IsGeneralPermissionReply(
+                    history[index].Content))
+            {
+                return false;
+            }
+
+            return history
+                .Take(index)
+                .Any(message =>
+                    message.Role.Equals(
+                        "assistant",
+                        StringComparison.OrdinalIgnoreCase) &&
+                    IsGeneralPermissionPrompt(
+                        message.Content));
+        }
+
+        return false;
+    }
+
+    private static string FindLatestAssistantAnswer(
+        IReadOnlyList<ChatHistoryMessage> history)
+    {
+        return history
+            .LastOrDefault(message =>
+                message.Role.Equals(
+                    "assistant",
+                    StringComparison.OrdinalIgnoreCase))
+            ?.Content
+            ?.Trim() ?? string.Empty;
+    }
+
+    private static string FindPreviousResponseLanguage(
+        IReadOnlyList<ChatHistoryMessage> history)
+    {
+        var previousUserMessage = history
+            .LastOrDefault(message =>
+                message.Role.Equals(
+                    "user",
+                    StringComparison.OrdinalIgnoreCase))
+            ?.Content;
+
+        return string.IsNullOrWhiteSpace(previousUserMessage)
+            ? "English"
+            : DetectResponseLanguage(previousUserMessage);
     }
 
     private async Task<string> SendChatAsync(
@@ -631,15 +1083,7 @@ public sealed class GroqChatCompletionService
              * Latin-letter Tamil clarification commands
              * should receive a Tanglish response.
              */
-            if (ContainsAny(
-                    normalized,
-                    "puriyala",
-                    "purila",
-                    "puriyavillai",
-                    "simple ah sollu",
-                    "simple-a sollu",
-                    "easy ah sollu",
-                    "thelivaga sollu"))
+            if (IsTanglishClarification(normalized))
             {
                 analysis.ResponseLanguage =
                     "Tanglish";
@@ -673,30 +1117,49 @@ public sealed class GroqChatCompletionService
 
         if (ContainsAny(
                 normalized,
-                "singlish",
-                "singlish walin",
-                "sinhala walin",
-                "sinhalen"))
+                "singlish"))
         {
             return "Singlish";
         }
 
         if (ContainsAny(
                 normalized,
-                "tanglish",
-                "tamil la",
-                "tamil-la",
-                "thamizh la",
-                "thamizh-la"))
+                "tanglish"))
         {
             return "Tanglish";
         }
 
         if (ContainsAny(
                 normalized,
-                "franÃ§ais",
+                "tamil la",
+                "tamill la",
+                "tamil-la",
+                "tamill-la",
+                "thamizh la",
+                "thamizh-la",
+                "answer in tamil",
+                "தமிழில்",
+                "தமிழ்"))
+        {
+            return "Tamil";
+        }
+
+        if (ContainsAny(
+                normalized,
+                "sinhala walin",
+                "sinhalen",
+                "answer in sinhala",
+                "සිංහලෙන්",
+                "සිංහල"))
+        {
+            return "Sinhala";
+        }
+
+        if (ContainsAny(
+                normalized,
+                "français",
                 "french",
-                "en franÃ§ais"))
+                "en français"))
         {
             return "French";
         }
@@ -704,7 +1167,7 @@ public sealed class GroqChatCompletionService
         if (ContainsAny(
                 normalized,
                 "hindi",
-                "à¤¹à¤¿à¤‚à¤¦à¥€"))
+                "हिंदी"))
         {
             return "Hindi";
         }
@@ -751,7 +1214,17 @@ public sealed class GroqChatCompletionService
                 "purila",
                 "simple ah sollu",
                 "easy ah sollu",
-                "thelivaga sollu"))
+                "thelivaga sollu",
+                "enna ",
+                "eanna ",
+                "sollu",
+                "solllu",
+                "mudium",
+                "therium",
+                "evlo",
+                "eavalo",
+                "parthu",
+                "pathu"))
         {
             return "Tanglish";
         }
@@ -793,7 +1266,9 @@ public sealed class GroqChatCompletionService
             if (IsLanguageCommand(normalized) ||
                 IsClarificationCommand(normalized) ||
                 IsGreeting(normalized) ||
-                IsAcknowledgement(normalized))
+                IsAcknowledgement(normalized) ||
+                IsCasualConversation(normalized) ||
+                IsGeneralPermissionReply(normalized))
             {
                 continue;
             }
@@ -807,54 +1282,123 @@ public sealed class GroqChatCompletionService
     private static bool IsLanguageCommand(
         string text)
     {
-        return ContainsAny(
-            text,
-            "singlish walin kiyanna",
-            "singlish walin",
-            "sinhala walin kiyanna",
-            "sinhala walin",
-            "tamil la sollu",
-            "tamil-la sollu",
-            "tanglish la sollu",
-            "à®¤à®®à®¿à®´à®¿à®²à¯ à®šà¯Šà®²à¯à®²à¯à®™à¯à®•à®³à¯",
-            "à®¤à®®à®¿à®´à®¿à®²à¯ à®šà¯Šà®²à¯à®²à¯",
-            "à®šà®¿à®™à¯à®•à®³à®¤à¯à®¤à®¿à®²à¯ à®šà¯Šà®²à¯à®²à¯à®™à¯à®•à®³à¯",
+        var normalized = NormalizeShortMessage(text);
+
+        // Stand-alone language names are valid commands.
+        if (normalized is
+            "tamil" or
+            "tamill" or
+            "thamizh" or
+            "தமிழ்" or
+            "english" or
+            "sinhala" or
+            "සිංහල" or
+            "singlish" or
+            "tanglish" or
+            "french" or
+            "français" or
+            "hindi" or
+            "हिंदी")
+        {
+            return true;
+        }
+
+        var mentionsLanguage = ContainsAny(
+            normalized,
+            "tamil",
+            "tamill",
+            "thamizh",
+            "தமிழ்",
+            "english",
+            "sinhala",
+            "සිංහල",
+            "singlish",
+            "tanglish",
+            "french",
+            "français",
+            "hindi",
+            "हिंदी");
+
+        var asksForResponse = ContainsAny(
+            normalized,
+            "sollu",
+            "solllu",
+            "sollunga",
+            "sollungal",
+            "kiyanna",
+            "walin",
+            "answer in",
+            "reply in",
+            "respond in",
             "in english",
-            "english la sollu",
-            "english walin",
-            "answer in tamil",
-            "answer in sinhala",
-            "answer in english",
-            "answer in french",
-            "rÃ©pondez en franÃ§ais",
-            "en franÃ§ais",
-            "à¤‰à¤¤à¥à¤¤à¤° à¤¹à¤¿à¤‚à¤¦à¥€ à¤®à¥‡à¤‚",
-            "hindi mein",
-            "hindi me");
+            "en français",
+            "répondez",
+            "mein bata",
+            "में बताइए");
+
+        return mentionsLanguage && asksForResponse;
     }
 
     private static bool IsClarificationCommand(
         string text)
     {
+        var normalized = NormalizeShortMessage(text);
+
+        if (normalized is
+            "enna" or
+            "eanna" or
+            "enna sollura" or
+            "eanna sollura")
+        {
+            return true;
+        }
+
         return ContainsAny(
-            text,
+            normalized,
             "puriyala",
+            "puriyalaa",
             "purila",
             "puriyavillai",
             "simple ah sollu",
             "simple-a sollu",
             "easy ah sollu",
+            "theliva sollu",
+            "thelivaa sollu",
             "thelivaga sollu",
-            "à®¤à¯†à®³à®¿à®µà®¾à®• à®šà¯Šà®²à¯à®²à¯à®™à¯à®•à®³à¯",
-            "à®Žà®³à®¿à®®à¯ˆà®¯à®¾à®• à®šà¯Šà®²à¯à®²à¯à®™à¯à®•à®³à¯",
-            "à®ªà¯à®°à®¿à®¯à®µà®¿à®²à¯à®²à¯ˆ",
+            "தெளிவாக சொல்லுங்கள்",
+            "எளிமையாக சொல்லுங்கள்",
+            "புரியவில்லை",
             "therenne naha",
-            "à¶­à·šà¶»à·™à¶±à·Šà¶±à·š à¶±à·à·„à·",
+            "තේරෙන්නේ නැහැ",
             "simple walin kiyanna",
             "explain clearly",
             "explain simply",
             "i don't understand",
             "i do not understand");
+    }
+
+    private static bool IsTanglishClarification(
+        string text)
+    {
+        var normalized = NormalizeShortMessage(text);
+
+        return normalized is
+                   "enna" or
+                   "eanna" or
+                   "enna sollura" or
+                   "eanna sollura" ||
+               ContainsAny(
+                   normalized,
+                   "puriyala",
+                   "puriyalaa",
+                   "purila",
+                   "puriyavillai",
+                   "simple ah sollu",
+                   "simple-a sollu",
+                   "easy ah sollu",
+                   "theliva sollu",
+                   "thelivaa sollu",
+                   "thelivaga sollu");
     }
 
     private static bool IsGreeting(
@@ -873,9 +1417,9 @@ public sealed class GroqChatCompletionService
             "good afternoon" or
             "good evening" or
             "vanakkam" or
-            "à®µà®£à®•à¯à®•à®®à¯" or
+            "வணக்கம்" or
             "ayubowan" or
-            "à¶†à¶ºà·”à¶¶à·à·€à¶±à·Š";
+            "ආයුබෝවන්";
     }
 
     private static bool IsAcknowledgement(
@@ -899,11 +1443,11 @@ public sealed class GroqChatCompletionService
             "thanks buddy" or
             "got it" or
             "understood" or
-            "à®šà®°à®¿" or
-            "à®šà®°à®¿ à®¨à®©à¯à®±à®¿" or
-            "à®¨à®©à¯à®±à®¿" or
-            "à·„à¶»à·’" or
-            "à·ƒà·Šà¶­à·”à¶­à·’à¶ºà·’";
+            "சரி" or
+            "சரி நன்றி" or
+            "நன்றி" or
+            "හරි" or
+            "ස්තුතියි";
     }
 
     private static string NormalizeShortMessage(
@@ -1087,22 +1631,22 @@ public sealed class GroqChatCompletionService
             .ToLowerInvariant() switch
         {
             "tamil" =>
-                "à®‡à®¨à¯à®¤ à®†à®µà®£à®¤à¯à®¤à®¿à®²à¯ à®ªà®¤à®¿à®²à¯ à®•à®¾à®£à®ªà¯à®ªà®Ÿà®µà®¿à®²à¯à®²à¯ˆ.",
+                "இந்த ஆவணத்தில் பதில் காணப்படவில்லை.",
 
             "tanglish" =>
                 "Indha document-la badhil kidaikkala.",
 
             "sinhala" =>
-                "à¶¸à·™à¶¸ à¶½à·šà¶›à¶±à¶ºà·š à¶´à·’à·…à·’à¶­à·”à¶» à·ƒà¶³à·„à¶±à·Š à¶šà¶» à¶±à·à·„à·.",
+                "මෙම ලේඛනයේ පිළිතුර සඳහන් කර නැහැ.",
 
             "singlish" =>
                 "Me document eke uththaraya sandahan wela naha.",
 
             "french" =>
-                "La rÃ©ponse ne figure pas dans ce document.",
+                "La réponse ne figure pas dans ce document.",
 
             "hindi" =>
-                "à¤‡à¤¸ à¤¦à¤¸à¥à¤¤à¤¾à¤µà¥‡à¤œà¤¼ à¤®à¥‡à¤‚ à¤‰à¤¤à¥à¤¤à¤° à¤¨à¤¹à¥€à¤‚ à¤®à¤¿à¤²à¤¾à¥¤",
+                "इस दस्तावेज़ में उत्तर नहीं मिला।",
 
             _ =>
                 "The answer was not found in this document."
@@ -1175,7 +1719,10 @@ public sealed class GroqChatCompletionService
             "Translation",
             "Acknowledgement",
             "Greeting",
-            "OutOfScope"
+            "CasualConversation",
+            "GeneralQuestion",
+            "GeneralPermissionGranted",
+            "GeneralPermissionDenied"
         };
 
         if (string.IsNullOrWhiteSpace(
@@ -1195,9 +1742,24 @@ public sealed class GroqChatCompletionService
                     StringComparison.OrdinalIgnoreCase));
         }
 
+        /*
+         * Deterministic document-first guard. A broad question
+         * must still be searched in the uploaded PDF unless the
+         * user explicitly asks for outside/general information.
+         */
+        if (analysis.Intent == "GeneralQuestion" &&
+            !IsExplicitExternalRequest(question))
+        {
+            analysis.Intent = "DocumentQuestion";
+        }
+
         var isDirectIntent =
             analysis.Intent == "Greeting" ||
-            analysis.Intent == "Acknowledgement";
+            analysis.Intent == "Acknowledgement" ||
+            analysis.Intent == "CasualConversation" ||
+            analysis.Intent == "GeneralQuestion" ||
+            analysis.Intent == "GeneralPermissionGranted" ||
+            analysis.Intent == "GeneralPermissionDenied";
 
         analysis.RequiresDocumentSearch =
             !isDirectIntent;
@@ -1205,7 +1767,9 @@ public sealed class GroqChatCompletionService
         if (isDirectIntent)
         {
             if (string.IsNullOrWhiteSpace(
-                    analysis.DirectResponse))
+                    analysis.DirectResponse) &&
+                (analysis.Intent == "Greeting" ||
+                 analysis.Intent == "Acknowledgement"))
             {
                 analysis.DirectResponse =
                     BuildDirectResponse(
@@ -1213,10 +1777,55 @@ public sealed class GroqChatCompletionService
                         analysis.Intent == "Greeting");
             }
 
+            if (string.IsNullOrWhiteSpace(
+                    analysis.DirectResponse) &&
+                analysis.Intent == "CasualConversation")
+            {
+                analysis.DirectResponse =
+                    BuildCasualResponse(
+                        question,
+                        analysis.ResponseLanguage);
+            }
+
+            if (analysis.Intent == "GeneralQuestion")
+            {
+                analysis.DirectResponse =
+                    BuildGeneralPermissionPrompt(
+                        analysis.ResponseLanguage);
+            }
+
+            if (string.IsNullOrWhiteSpace(
+                    analysis.DirectResponse) &&
+                analysis.Intent == "GeneralPermissionDenied")
+            {
+                analysis.DirectResponse =
+                    "Okay. I will continue using only the " +
+                    "uploaded document.";
+            }
+
+            if (string.IsNullOrWhiteSpace(
+                    analysis.DirectResponse) &&
+                analysis.Intent == "GeneralPermissionGranted")
+            {
+                analysis.DirectResponse =
+                    "Please repeat the general question, and " +
+                    "I’ll help you with it.";
+            }
+
             analysis.SearchQuestion = string.Empty;
             analysis.IsFollowUp = false;
             analysis.IsClarificationRequest = false;
             analysis.IsTranslationRequest = false;
+
+            analysis.RequiresExternalKnowledge =
+                analysis.Intent == "GeneralQuestion";
+
+            analysis.IsExternalPermissionResponse =
+                analysis.Intent == "GeneralPermissionGranted" ||
+                analysis.Intent == "GeneralPermissionDenied";
+
+            analysis.ExternalPermissionGranted =
+                analysis.Intent == "GeneralPermissionGranted";
         }
         else
         {
@@ -1289,6 +1898,652 @@ public sealed class GroqChatCompletionService
         {
             analysis.IsFollowUp = true;
         }
+    }
+
+    private static string? FindPendingGeneralQuestion(
+        IReadOnlyList<ChatHistoryMessage> history)
+    {
+        for (var index = history.Count - 1;
+             index >= 0;
+             index--)
+        {
+            var message = history[index];
+
+            if (!message.Role.Equals(
+                    "assistant",
+                    StringComparison.OrdinalIgnoreCase) ||
+                !IsGeneralPermissionPrompt(
+                    message.Content))
+            {
+                continue;
+            }
+
+            /*
+             * If the user already replied to this permission
+             * prompt, it is no longer pending.
+             */
+            var alreadyResolved = history
+                .Skip(index + 1)
+                .Any(laterMessage =>
+                    laterMessage.Role.Equals(
+                        "user",
+                        StringComparison.OrdinalIgnoreCase) &&
+                    IsGeneralPermissionReply(
+                        laterMessage.Content));
+
+            if (alreadyResolved)
+            {
+                return null;
+            }
+
+            for (var questionIndex = index - 1;
+                 questionIndex >= 0;
+                 questionIndex--)
+            {
+                var possibleQuestion =
+                    history[questionIndex];
+
+                if (!possibleQuestion.Role.Equals(
+                        "user",
+                        StringComparison.OrdinalIgnoreCase) ||
+                    string.IsNullOrWhiteSpace(
+                        possibleQuestion.Content))
+                {
+                    continue;
+                }
+
+                var normalizedCandidate =
+                    possibleQuestion.Content
+                        .Trim()
+                        .ToLowerInvariant();
+
+                if (IsUnclearPermissionReply(
+                        normalizedCandidate) ||
+                    IsGreeting(normalizedCandidate) ||
+                    IsAcknowledgement(normalizedCandidate) ||
+                    IsCasualConversation(
+                        normalizedCandidate))
+                {
+                    continue;
+                }
+
+                return possibleQuestion.Content.Trim();
+            }
+
+            return null;
+        }
+
+        return null;
+    }
+
+    private static bool IsGeneralPermissionPrompt(
+        string? text)
+    {
+        if (string.IsNullOrWhiteSpace(text))
+        {
+            return false;
+        }
+
+        return ContainsAny(
+            text.ToLowerInvariant(),
+            "general ai knowledge",
+            "general knowledge",
+            "outside the document",
+            "ஆவணத்திற்கு வெளியே",
+            "பொதுவான அறிவைப்",
+            "பொதுவான ai அறிவைப்",
+            "document ekata pitin",
+            "document eken pita",
+            "සාමාන්‍ය ai දැනුම",
+            "connaissances générales",
+            "सामान्य ai ज्ञान");
+    }
+
+    private static bool IsCasualConversation(
+        string text)
+    {
+        var normalized = NormalizeShortMessage(text);
+
+        return ContainsAny(
+            normalized,
+            "how are you",
+            "how about you",
+            "what about you",
+            "what about to you",
+            "who are you",
+            "what are you",
+            "what can you do",
+            "how can you help",
+            "what help can you",
+            "enna help",
+            "eanna help",
+            "enna panna mudium",
+            "eanna panna mudium",
+            "உன்னால் என்ன",
+            "நீ யார்",
+            "ඔයා කවුද");
+    }
+
+    private static bool IsAssistantCapabilityQuestion(
+        string text)
+    {
+        var normalized = NormalizeShortMessage(text);
+
+        return IsPdfImageCapabilityQuestion(normalized) ||
+            ContainsAny(
+            normalized,
+            "what can you do",
+            "how can you help",
+            "enna help",
+            "eanna help",
+            "enna panna mudium",
+            "eanna panna mudium",
+            "pdf ulla photo",
+            "pdf la photo",
+            "pdf image",
+            "images in pdf",
+            "photo parthu",
+            "photo pathu",
+            "படங்களை பார்க்க",
+            "படம் பார்க்க",
+            "maximum pdf",
+            "max pdf",
+            "pdf size",
+            "how big pdf",
+            "evlo periya pdf",
+            "eavalo periya pdf",
+            "எவ்வளவு பெரிய pdf",
+            "what languages",
+            "which languages",
+            "languages do you know",
+            "language therium",
+            "languages therium",
+            "therinja language",
+            "therinja langvage",
+            "enna enna moli",
+            "eanna eanna moli",
+            "என்ன மொழிகள்",
+            "எந்த மொழிகள்");
+    }
+
+    private static string BuildCapabilityResponse(
+        string question,
+        string? language)
+    {
+        var normalized = NormalizeShortMessage(question);
+        var requestedLanguage = language?
+            .Trim()
+            .ToLowerInvariant() ?? "english";
+
+        var asksAboutImages =
+            IsPdfImageCapabilityQuestion(normalized);
+
+        if (asksAboutImages)
+        {
+            return requestedLanguage switch
+            {
+                "tamil" =>
+                    "PDF-ல் உள்ள ஸ்கேன் செய்யப்பட்ட படங்களில் " +
+                    "இருக்கும் தமிழ் மற்றும் ஆங்கில எழுத்துகளை OCR " +
+                    "மூலம் படிக்க முடியும். ஆனால் புகைப்படத்தில் உள்ள " +
+                    "நபர்கள், பொருட்கள் அல்லது காட்சிகளை visual AI " +
+                    "போல் இன்னும் புரிந்து விவரிக்க முடியாது.",
+                "tanglish" =>
+                    "PDF-la scan image-kulla irukkira Tamil/English " +
+                    "text-ai OCR moolama read panna mudiyum. Aana " +
+                    "photo-la irukkira person, object, scene-ai visual " +
+                    "AI madhiri innum understand panni describe panna " +
+                    "mudiyadhu.",
+                "singlish" =>
+                    "PDF scan image eke thiyena Tamil/English text OCR " +
+                    "walin read karanna puluwan. Habai photo eke people, " +
+                    "objects saha scene visual AI wage describe karanna " +
+                    "thama baha.",
+                _ =>
+                    "I can use OCR to read Tamil and English text inside " +
+                    "scanned PDF images. I cannot yet visually identify " +
+                    "and describe people, objects or scenes in photos."
+            };
+        }
+
+        var asksAboutPdfSize = ContainsAny(
+            normalized,
+            "maximum pdf",
+            "max pdf",
+            "pdf size",
+            "how big pdf",
+            "evlo periya pdf",
+            "eavalo periya pdf",
+            "எவ்வளவு பெரிய pdf");
+
+        if (asksAboutPdfSize)
+        {
+            return requestedLanguage switch
+            {
+                "tamil" =>
+                    "தற்போது ஒரு PDF-க்கு அதிகபட்சமாக சுமார் 20 MB " +
+                    "வரை upload செய்யலாம். மிகப் பெரிய PDF என்றால் அதை " +
+                    "சிறிய பகுதிகளாகப் பிரித்து upload செய்வது நல்லது.",
+                "tanglish" =>
+                    "Ippo oru PDF maximum-a approximately 20 MB varaikkum " +
+                    "upload panna mudiyum. Romba periya PDF-na small parts-a " +
+                    "split panni upload pannunga.",
+                "singlish" =>
+                    "Dan eka PDF ekak approximately 20 MB wenakan upload " +
+                    "karanna puluwan. Loku PDF ekak nam podi kotas walata " +
+                    "split karala upload karanna.",
+                _ =>
+                    "The current upload limit is approximately 20 MB per " +
+                    "PDF. For larger documents, split the PDF into smaller " +
+                    "parts before uploading."
+            };
+        }
+
+        var asksAboutLanguages = ContainsAny(
+            normalized,
+            "what languages",
+            "which languages",
+            "languages do you know",
+            "language therium",
+            "languages therium",
+            "therinja language",
+            "therinja langvage",
+            "enna enna moli",
+            "eanna eanna moli",
+            "என்ன மொழிகள்",
+            "எந்த மொழிகள்");
+
+        if (asksAboutLanguages)
+        {
+            return requestedLanguage switch
+            {
+                "tamil" =>
+                    "தமிழ், ஆங்கிலம், சிங்களம், Tanglish, Singlish, " +
+                    "பிரெஞ்சு மற்றும் ஹிந்தி உட்பட பல மொழிகளில் உங்கள் " +
+                    "கேள்விகளைப் புரிந்து பதில் சொல்ல முடியும்.",
+                "tanglish" =>
+                    "Tamil, English, Sinhala, Tanglish, Singlish, French, " +
+                    "Hindi including pala languages-la unga questions-ai " +
+                    "understand panni answer solla mudiyum.",
+                "singlish" =>
+                    "Tamil, English, Sinhala, Tanglish, Singlish, French saha " +
+                    "Hindi wage languages godak therum aran answer karanna " +
+                    "puluwan.",
+                _ =>
+                    "I can understand and answer in many languages, including " +
+                    "Tamil, English, Sinhala, Tanglish, Singlish, French and Hindi."
+            };
+        }
+
+        return BuildCasualResponse(question, language);
+    }
+
+    private static bool IsPdfImageCapabilityQuestion(
+        string text)
+    {
+        var normalized = NormalizeShortMessage(text);
+
+        var mentionsPdf = ContainsAny(
+            normalized,
+            "pdf",
+            "document",
+            "ஆவணம்");
+
+        var mentionsImage = ContainsAny(
+            normalized,
+            "photo",
+            "photos",
+            "image",
+            "images",
+            "படம்",
+            "படங்களை",
+            "புகைப்படம்");
+
+        var asksToInspect = ContainsAny(
+            normalized,
+            "parthu",
+            "pathu",
+            "paarka",
+            "read",
+            "see",
+            "view",
+            "analyse",
+            "analyze",
+            "describe",
+            "பார்க்க",
+            "படிக்க",
+            "விவரிக்க",
+            "முடியுமா");
+
+        return mentionsPdf &&
+               mentionsImage &&
+               asksToInspect;
+    }
+
+    private static bool IsExplicitExternalRequest(
+        string text)
+    {
+        var normalized = NormalizeShortMessage(text);
+
+        return ContainsAny(
+            normalized,
+            "outside this document",
+            "outside the document",
+            "beyond this document",
+            "from general knowledge",
+            "using general knowledge",
+            "search the internet",
+            "search online",
+            "web search",
+            "document-ku veliya",
+            "document la illama",
+            "ஆவணத்திற்கு வெளியே",
+            "இணையத்தில் தேடு");
+    }
+
+    private static string BuildGeneralPermissionPrompt(
+        string? language)
+    {
+        return language?
+            .Trim()
+            .ToLowerInvariant() switch
+        {
+            "tamil" =>
+                "இந்தக் கேள்வி பதிவேற்றிய ஆவணத்துடன் " +
+                "தொடர்புடையது அல்ல. பொதுவான AI அறிவைப் " +
+                "பயன்படுத்தி பதில் சொல்லவா?",
+
+            "tanglish" =>
+                "Indha question uploaded document-oda " +
+                "related illa. General AI knowledge use " +
+                "panni answer sollava?",
+
+            "sinhala" =>
+                "මෙම ප්‍රශ්නය උඩුගත කළ ලේඛනයට අදාළ නැහැ. " +
+                "සාමාන්‍ය AI දැනුමෙන් පිළිතුරු දෙන්නද?",
+
+            "singlish" =>
+                "Me question eka uploaded document ekata " +
+                "related naha. General AI knowledge use " +
+                "karala answer karannada?",
+
+            "french" =>
+                "Cette question ne concerne pas le document. " +
+                "Voulez-vous une réponse basée sur les " +
+                "connaissances générales de l’IA ?",
+
+            "hindi" =>
+                "यह प्रश्न अपलोड किए गए दस्तावेज़ से संबंधित " +
+                "नहीं है। क्या मैं सामान्य AI ज्ञान से उत्तर दूँ?",
+
+            _ =>
+                "This question is not related to the uploaded " +
+                "document. Would you like an answer using " +
+                "general AI knowledge?"
+        };
+    }
+
+    private static string BuildCasualResponse(
+        string question,
+        string? language)
+    {
+        var normalized = NormalizeShortMessage(question);
+        var asksAboutAssistant = ContainsAny(
+            normalized,
+            "about you",
+            "who are you",
+            "what are you",
+            "உன்னை பற்றி",
+            "ඔයා කවුද");
+
+        if (asksAboutAssistant)
+        {
+            return language?
+                .Trim()
+                .ToLowerInvariant() switch
+            {
+                "tamil" =>
+                    "நான் GazetteAI. உங்கள் ஆவணங்களைப் " +
+                    "புரிந்துகொண்டு கேள்விகளுக்கு பதில் " +
+                    "சொல்லும் AI உதவியாளர்.",
+
+                "tanglish" =>
+                    "Naan GazetteAI. Unga documents-ai " +
+                    "understand panni questions-ku answer " +
+                    "sollura AI assistant.",
+
+                "singlish" =>
+                    "Mama GazetteAI. Oyage documents " +
+                    "therum aran questions walata answer " +
+                    "karana AI assistant kenek.",
+
+                _ =>
+                    "I’m GazetteAI, a friendly AI assistant " +
+                    "that understands your documents and " +
+                    "answers your questions."
+            };
+        }
+
+        return "I’m doing well, thank you! How can I help you?";
+    }
+
+    private static bool IsGeneralPermissionReply(
+        string text)
+    {
+        var normalized = NormalizeShortMessage(text);
+
+        if (normalized is
+            "yes" or
+            "yeah" or
+            "okay" or
+            "ok" or
+            "sure" or
+            "tell me" or
+            "search" or
+            "sollu" or
+            "solllu" or
+            "ஆம்" or
+            "சொல்லு" or
+            "வேண்டாம்" or
+            "no" or
+            "no thanks" or
+            "don't" or
+            "dont" or
+            "epa" or
+            "kiyanna")
+        {
+            return true;
+        }
+
+        return normalized.StartsWith(
+                   "yes ",
+                   StringComparison.OrdinalIgnoreCase) ||
+               normalized.StartsWith(
+                   "yes,",
+                   StringComparison.OrdinalIgnoreCase) ||
+               normalized.StartsWith(
+                   "okay ",
+                   StringComparison.OrdinalIgnoreCase) ||
+               normalized.StartsWith(
+                   "okay,",
+                   StringComparison.OrdinalIgnoreCase) ||
+               normalized.StartsWith(
+                   "ok ",
+                   StringComparison.OrdinalIgnoreCase) ||
+               normalized.StartsWith(
+                   "ok,",
+                   StringComparison.OrdinalIgnoreCase) ||
+               normalized.StartsWith(
+                   "sure ",
+                   StringComparison.OrdinalIgnoreCase) ||
+               normalized.StartsWith(
+                   "ஆம் ",
+                   StringComparison.OrdinalIgnoreCase) ||
+               normalized.StartsWith(
+                   "ஆம்,",
+                   StringComparison.OrdinalIgnoreCase) ||
+               normalized.StartsWith(
+                   "ஆமாம் ",
+                   StringComparison.OrdinalIgnoreCase) ||
+               normalized.StartsWith(
+                   "சரி ",
+                   StringComparison.OrdinalIgnoreCase) ||
+               normalized.StartsWith(
+                   "ow ",
+                   StringComparison.OrdinalIgnoreCase) ||
+               normalized.StartsWith(
+                   "hari ",
+                   StringComparison.OrdinalIgnoreCase) ||
+               normalized.StartsWith(
+                   "ඔව් ",
+                   StringComparison.OrdinalIgnoreCase) ||
+               normalized.StartsWith(
+                   "oui ",
+                   StringComparison.OrdinalIgnoreCase) ||
+               normalized.StartsWith(
+                   "हाँ ",
+                   StringComparison.OrdinalIgnoreCase) ||
+               normalized.StartsWith(
+                   "no ",
+                   StringComparison.OrdinalIgnoreCase) ||
+               ContainsAny(
+                   normalized,
+                   "general knowledge use",
+                   "outside answer",
+                   "வெளியில் இருந்து சொல்லு",
+                   "இணையத்தில் தேடி",
+                   "இணையத்தில் தேடு",
+                   "web la search",
+                   "internet la search",
+                   "web eken hoyala",
+                   "internet eken hoyala");
+    }
+
+    private static bool IsNegativePermissionReply(
+        string text)
+    {
+        var normalized = NormalizeShortMessage(text);
+
+        return normalized is
+                   "no" or
+                   "no thanks" or
+                   "don't" or
+                   "dont" or
+                   "epa" or
+                   "வேண்டாம்" ||
+               normalized.StartsWith(
+                   "no ",
+                   StringComparison.OrdinalIgnoreCase);
+    }
+
+    private static bool IsUnclearPermissionReply(
+        string text)
+    {
+        var normalized = NormalizeShortMessage(text);
+
+        return normalized is
+            "h" or
+            "hm" or
+            "hmm" or
+            "mmm" or
+            "?";
+    }
+
+    private static ConversationAnalysis
+        CreatePermissionDecisionAnalysis(
+            bool granted,
+            string responseLanguage,
+            string directResponse,
+            string externalQuestion = "")
+    {
+        return new ConversationAnalysis
+        {
+            Intent = granted
+                ? "GeneralPermissionGranted"
+                : "GeneralPermissionDenied",
+
+            RequiresDocumentSearch = false,
+            DirectResponse = directResponse,
+            SearchQuestion = string.Empty,
+            ResponseLanguage = responseLanguage,
+            ResponseStyle = "standard",
+            IsFollowUp = true,
+            RequiresExternalKnowledge = granted,
+            IsExternalPermissionResponse = true,
+            ExternalPermissionGranted = granted,
+            ExternalQuestion = externalQuestion
+        };
+    }
+
+    private static string BuildWebSearchUnavailableResponse(
+        string? language)
+    {
+        return language?.Trim().ToLowerInvariant() switch
+        {
+            "tamil" =>
+                "மன்னிக்கவும், நம்பகமான தற்போதைய தகவலை " +
+                "இணையத்தில் கண்டுபிடிக்க முடியவில்லை.",
+            "tanglish" =>
+                "Sorry, reliable current information web-la " +
+                "kidaikkala.",
+            "singlish" =>
+                "Sorry, reliable current information web eken " +
+                "hoya ganna bari una.",
+            _ =>
+                "Sorry, I couldn’t find reliable current " +
+                "information on the web."
+        };
+    }
+
+    private static string BuildPermissionReminder(
+        string? language)
+    {
+        return language?
+            .Trim()
+            .ToLowerInvariant() switch
+        {
+            "tamil" =>
+                "உங்கள் பதில் தெளிவாக இல்லை. பொதுவான AI " +
+                "அறிவைப் பயன்படுத்த வேண்டுமா? ஆம் அல்லது " +
+                "வேண்டாம் என்று சொல்லுங்கள்.",
+
+            "tanglish" =>
+                "Unga reply clear-a illa. General AI knowledge " +
+                "use pannava? Yes illa no-nu sollunga.",
+
+            "singlish" =>
+                "Oyage reply eka clear naha. General AI " +
+                "knowledge use karannada? Yes nathnam no kiyanna.",
+
+            _ =>
+                "I’m not sure whether that means yes or no. " +
+                "Would you like me to use general AI knowledge?"
+        };
+    }
+
+    private static string BuildPermissionDeclinedResponse(
+        string? language)
+    {
+        return language?
+            .Trim()
+            .ToLowerInvariant() switch
+        {
+            "tamil" =>
+                "சரி. பதிவேற்றிய ஆவணத்தில் உள்ள " +
+                "தகவல்களை மட்டும் பயன்படுத்துகிறேன்.",
+
+            "tanglish" =>
+                "Sari. Uploaded document-la irukkira " +
+                "information mattum use panren.",
+
+            "singlish" =>
+                "Hari. Uploaded document eke thiyena " +
+                "information witharak use karannam.",
+
+            _ =>
+                "Okay. I’ll continue using only the " +
+                "uploaded document."
+        };
     }
 
     private static string FormatHistory(

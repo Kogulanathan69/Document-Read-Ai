@@ -5,12 +5,14 @@ import {
 } from '@angular/core';
 
 import { CommonModule } from '@angular/common';
+import { Router } from '@angular/router';
 
 import {
   AnswerSource,
   DocumentApi,
   UploadDocumentResponse
 } from '../../services/document-api';
+import { AuthService } from '../../services/auth';
 
 interface ChatMessage {
   id: number;
@@ -33,8 +35,8 @@ export class DocumentChat {
   private readonly changeDetector =
     inject(ChangeDetectorRef);
 
-  private readonly testUserId =
-    '11111111-1111-1111-1111-111111111111';
+  private readonly authService = inject(AuthService);
+  private readonly router = inject(Router);
 
   private messageId = 0;
 
@@ -59,6 +61,8 @@ export class DocumentChat {
 
   errorMessage = '';
   questionError = '';
+
+  readonly currentUser = this.authService.currentUser;
 
   onFileSelected(event: Event): void {
     const input =
@@ -101,7 +105,7 @@ export class DocumentChat {
     this.documentApi
       .uploadDocument(
         this.selectedFile,
-        this.testUserId
+        this.requireUserId()
       )
       .subscribe({
         next: response => {
@@ -179,7 +183,7 @@ export class DocumentChat {
 
     this.documentApi
       .askDocument(
-        this.testUserId,
+        this.requireUserId(),
         this.uploadedDocument.documentId,
         currentQuestion,
         this.conversationId
@@ -248,6 +252,11 @@ export class DocumentChat {
     this.changeDetector.markForCheck();
   }
 
+  logout(): void {
+    this.authService.logout();
+    void this.router.navigate(['/auth']);
+  }
+
   private resetConversation(): void {
     this.conversationId = null;
     this.messages = [];
@@ -267,6 +276,18 @@ export class DocumentChat {
       content,
       sources
     });
+  }
+
+  private requireUserId(): string {
+    const userId = this.currentUser()?.userId;
+
+    if (!userId) {
+      this.authService.logout();
+      void this.router.navigate(['/auth']);
+      throw new Error('Authenticated user is unavailable.');
+    }
+
+    return userId;
   }
 
   private getErrorMessage(

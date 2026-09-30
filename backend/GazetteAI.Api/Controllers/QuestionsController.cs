@@ -3,12 +3,15 @@ using GazetteAI.Application.Documents.Models;
 using GazetteAI.Domain.Entities;
 using GazetteAI.Infrastructure.AI;
 using GazetteAI.Infrastructure.Data;
+using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.EntityFrameworkCore;
+using System.Security.Claims;
 
 namespace GazetteAI.Api.Controllers;
 
 [ApiController]
+[Authorize]
 [Route("api/[controller]")]
 public sealed class QuestionsController : ControllerBase
 {
@@ -37,6 +40,16 @@ public sealed class QuestionsController : ControllerBase
         [FromBody] AskDocumentRequest request,
         CancellationToken cancellationToken)
     {
+        if (!TryGetCurrentUserId(out var userId))
+        {
+            return Unauthorized(new
+            {
+                message =
+                    "The authentication token does not " +
+                    "contain a valid user ID."
+            });
+        }
+
         var validationResult =
             ValidateRequest(request);
 
@@ -61,7 +74,7 @@ public sealed class QuestionsController : ControllerBase
                             item.Id ==
                                 request.DocumentId &&
                             item.UserId ==
-                                request.UserId,
+                                userId,
                         cancellationToken);
 
             if (document is null)
@@ -90,7 +103,7 @@ public sealed class QuestionsController : ControllerBase
                         message.ConversationId ==
                             conversationId &&
                         message.UserId ==
-                            request.UserId &&
+                            userId &&
                         message.DocumentId ==
                             request.DocumentId)
                     .OrderByDescending(message =>
@@ -189,7 +202,7 @@ public sealed class QuestionsController : ControllerBase
 
                     await SaveConversationMessagesAsync(
                         conversationId,
-                        request.UserId,
+                        userId,
                         request.DocumentId,
                         normalizedQuestion,
                         webAnswer,
@@ -239,7 +252,7 @@ public sealed class QuestionsController : ControllerBase
 
                 await SaveConversationMessagesAsync(
                     conversationId,
-                    request.UserId,
+                    userId,
                     request.DocumentId,
                     normalizedQuestion,
                     directAnswer,
@@ -314,7 +327,7 @@ public sealed class QuestionsController : ControllerBase
                         chunk.DocumentId ==
                             request.DocumentId &&
                         chunk.UserId ==
-                            request.UserId)
+                            userId)
                     .ToListAsync(cancellationToken);
 
             if (chunks.Count == 0)
@@ -409,7 +422,7 @@ public sealed class QuestionsController : ControllerBase
 
                 await SaveConversationMessagesAsync(
                     conversationId,
-                    request.UserId,
+                    userId,
                     request.DocumentId,
                     normalizedQuestion,
                     permissionPrompt,
@@ -446,7 +459,7 @@ public sealed class QuestionsController : ControllerBase
 
             await SaveConversationMessagesAsync(
                 conversationId,
-                request.UserId,
+                userId,
                 request.DocumentId,
                 normalizedQuestion,
                 answer.Trim(),
@@ -667,11 +680,6 @@ public sealed class QuestionsController : ControllerBase
     private static string? ValidateRequest(
         AskDocumentRequest request)
     {
-        if (request.UserId == Guid.Empty)
-        {
-            return "Valid userId is required.";
-        }
-
         if (request.DocumentId == Guid.Empty)
         {
             return "Valid documentId is required.";
@@ -690,6 +698,19 @@ public sealed class QuestionsController : ControllerBase
         }
 
         return null;
+    }
+
+    private bool TryGetCurrentUserId(
+        out Guid userId)
+    {
+        var userIdValue =
+            User.FindFirstValue(
+                ClaimTypes.NameIdentifier);
+
+        return Guid.TryParse(
+            userIdValue,
+            out userId) &&
+            userId != Guid.Empty;
     }
 
     private static string BuildExternalPermissionPrompt(
@@ -789,7 +810,6 @@ public sealed class QuestionsController : ControllerBase
 }
 
 public sealed record AskDocumentRequest(
-    Guid UserId,
     Guid DocumentId,
     string Question,
     Guid? ConversationId);

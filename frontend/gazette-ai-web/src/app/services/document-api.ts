@@ -80,13 +80,11 @@ export class DocumentApi {
     'http://localhost:5114/api';
 
   uploadDocument(
-    file: File,
-    userId: string
+    file: File
   ): Observable<UploadDocumentResponse> {
     const formData = new FormData();
 
     formData.append('file', file);
-    formData.append('userId', userId);
 
     return this.http.post<UploadDocumentResponse>(
       `${this.apiBaseUrl}/documents/upload`,
@@ -95,7 +93,6 @@ export class DocumentApi {
   }
 
   askDocument(
-    userId: string,
     documentId: string,
     question: string,
     conversationId: string | null
@@ -103,7 +100,6 @@ export class DocumentApi {
     return this.http.post<AskDocumentResponse>(
       `${this.apiBaseUrl}/questions/ask`,
       {
-        userId,
         documentId,
         question,
         conversationId

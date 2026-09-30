@@ -104,8 +104,7 @@ export class DocumentChat {
 
     this.documentApi
       .uploadDocument(
-        this.selectedFile,
-        this.requireUserId()
+        this.selectedFile
       )
       .subscribe({
         next: response => {
@@ -183,7 +182,6 @@ export class DocumentChat {
 
     this.documentApi
       .askDocument(
-        this.requireUserId(),
         this.uploadedDocument.documentId,
         currentQuestion,
         this.conversationId
@@ -276,18 +274,6 @@ export class DocumentChat {
       content,
       sources
     });
-  }
-
-  private requireUserId(): string {
-    const userId = this.currentUser()?.userId;
-
-    if (!userId) {
-      this.authService.logout();
-      void this.router.navigate(['/auth']);
-      throw new Error('Authenticated user is unavailable.');
-    }
-
-    return userId;
   }
 
   private getErrorMessage(

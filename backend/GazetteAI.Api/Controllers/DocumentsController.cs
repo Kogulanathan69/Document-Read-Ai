@@ -2,8 +2,10 @@
 using GazetteAI.Application.Documents.Models;
 using GazetteAI.Domain.Entities;
 using GazetteAI.Infrastructure.Data;
+using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.EntityFrameworkCore;
+using System.Security.Claims;
 
 using DocumentEntity =
     GazetteAI.Domain.Entities.Document;
@@ -11,6 +13,7 @@ using DocumentEntity =
 namespace GazetteAI.Api.Controllers;
 
 [ApiController]
+[Authorize]
 [Route("api/[controller]")]
 public sealed class DocumentsController : ControllerBase
 {
@@ -131,7 +134,6 @@ public sealed class DocumentsController : ControllerBase
     [RequestSizeLimit(20_000_000)]
     public async Task<IActionResult> UploadAndIndex(
         [FromForm] IFormFile file,
-        [FromForm] Guid userId,
         CancellationToken cancellationToken)
     {
         var validationError = ValidatePdf(file);
@@ -141,10 +143,12 @@ public sealed class DocumentsController : ControllerBase
             return BadRequest(validationError);
         }
 
-        if (userId == Guid.Empty)
+        if (!TryGetCurrentUserId(out var userId))
         {
-            return BadRequest(
-                "Valid userId is required.");
+            return Unauthorized(new
+            {
+                message = "The authentication token does not contain a valid user ID."
+            });
         }
 
         var userExists =
@@ -331,6 +335,19 @@ public sealed class DocumentsController : ControllerBase
         }
 
         return null;
+    }
+
+    private bool TryGetCurrentUserId(
+        out Guid userId)
+    {
+        var userIdValue =
+            User.FindFirstValue(
+                ClaimTypes.NameIdentifier);
+
+        return Guid.TryParse(
+            userIdValue,
+            out userId) &&
+            userId != Guid.Empty;
     }
 }
 

@@ -35,6 +35,68 @@
     0 20px 60px rgba(48, 68, 120, 0.12);
 }
 
+.account-bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  padding-bottom: 18px;
+  margin-bottom: 24px;
+  border-bottom: 1px solid #e8eaf0;
+}
+
+.account-profile {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  gap: 11px;
+
+  div {
+    display: grid;
+    min-width: 0;
+    gap: 2px;
+  }
+
+  strong,
+  small {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  small {
+    color: #798296;
+  }
+}
+
+.account-avatar {
+  display: grid;
+  width: 40px;
+  height: 40px;
+  flex-shrink: 0;
+  place-items: center;
+  color: #202127;
+  font-weight: 900;
+  background: #f6bd35;
+  border-radius: 13px 13px 4px 13px;
+}
+
+.logout-button,
+.new-chat-button {
+  padding: 9px 14px;
+  font-size: 12px;
+  font-weight: 800;
+  cursor: pointer;
+  border-radius: 9px;
+}
+
+.logout-button {
+  flex-shrink: 0;
+  color: #5b6372;
+  background: #fff;
+  border: 1px solid #dfe3ea;
+}
+
 .header {
   display: flex;
   align-items: center;
@@ -545,4 +607,11 @@
     width: 43px;
     height: 43px;
   }
+}
+
+.new-chat-button {
+  margin-left: auto;
+  color: #fff;
+  background: rgba(255, 255, 255, 0.1);
+  border: 1px solid rgba(255, 255, 255, 0.3);
 }

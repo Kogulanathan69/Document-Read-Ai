@@ -18,7 +18,10 @@ public sealed class ConversationAnalysis
      * Translation
      * Acknowledgement
      * Greeting
-     * OutOfScope
+     * CasualConversation
+     * GeneralQuestion
+     * GeneralPermissionGranted
+     * GeneralPermissionDenied
      */
     public string Intent { get; set; } =
         "DocumentQuestion";
@@ -80,6 +83,25 @@ public sealed class ConversationAnalysis
     public bool IsClarificationRequest { get; set; }
 
     public bool IsTranslationRequest { get; set; }
+
+    /*
+     * GeneralQuestion means that the message is not asking
+     * about the uploaded document. The assistant first asks
+     * permission before using general model knowledge.
+     */
+    public bool RequiresExternalKnowledge { get; set; }
+
+    public bool IsExternalPermissionResponse { get; set; }
+
+    public bool ExternalPermissionGranted { get; set; }
+
+    /*
+     * Permission was granted for this earlier question.
+     * The API uses it for live web search; it is never
+     * treated as document content.
+     */
+    public string ExternalQuestion { get; set; } =
+        string.Empty;
 
     /*
      * Optional additional instruction generated

@@ -1,4 +1,5 @@
 using System.Text;
+using System.Threading.RateLimiting;
 using GazetteAI.Application.Authentication.Interfaces;
 using GazetteAI.Application.Documents.Interfaces;
 using GazetteAI.Application.Documents.Services;
@@ -7,6 +8,7 @@ using GazetteAI.Infrastructure.Authentication;
 using GazetteAI.Infrastructure.Data;
 using GazetteAI.Infrastructure.Documents;
 using Microsoft.AspNetCore.Authentication.JwtBearer;
+using Microsoft.AspNetCore.RateLimiting;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.IdentityModel.Tokens;
 using Pgvector.EntityFrameworkCore;
@@ -160,6 +162,86 @@ builder.Services
 builder.Services.AddAuthorization();
 
 /*
+ * API rate limiting
+ *
+ * Authenticated users:
+ * Each user receives an independent rate-limit bucket.
+ *
+ * Unauthenticated users:
+ * The client IP address is used as the bucket key.
+ *
+ * Current starting limit:
+ * 60 requests per minute.
+ *
+ * This can be tuned later after load testing.
+ */
+
+builder.Services.AddRateLimiter(options =>
+{
+    options.RejectionStatusCode =
+        StatusCodes.Status429TooManyRequests;
+
+    options.AddPolicy(
+        "ApiRateLimit",
+        httpContext =>
+        {
+            string partitionKey;
+
+            if (httpContext.User.Identity?.IsAuthenticated == true)
+            {
+                partitionKey =
+                    httpContext.User.FindFirst(
+                        System.Security.Claims.ClaimTypes.NameIdentifier)
+                        ?.Value
+                    ?? httpContext.User.Identity.Name
+                    ?? "authenticated-user";
+            }
+            else
+            {
+                partitionKey =
+                    httpContext.Connection.RemoteIpAddress
+                        ?.ToString()
+                    ?? "anonymous";
+            }
+
+            return RateLimitPartition
+                .GetFixedWindowLimiter(
+                    partitionKey,
+                    _ =>
+                        new FixedWindowRateLimiterOptions
+                        {
+                            PermitLimit = 60,
+
+                            Window =
+                                TimeSpan.FromMinutes(1),
+
+                            QueueProcessingOrder =
+                                QueueProcessingOrder.OldestFirst,
+
+                            QueueLimit = 0,
+
+                            AutoReplenishment = true
+                        });
+        });
+
+    options.OnRejected =
+        async (context, cancellationToken) =>
+        {
+            context.HttpContext.Response.ContentType =
+                "application/json";
+
+            await context.HttpContext.Response.WriteAsJsonAsync(
+                new
+                {
+                    status = 429,
+                    message =
+                        "Too many requests. Please wait a moment and try again."
+                },
+                cancellationToken);
+        };
+});
+
+/*
  * Angular frontend CORS
  */
 
@@ -188,9 +270,15 @@ app.UseCors("AngularFrontend");
 
 app.UseHttpsRedirection();
 
+/*
+ * Authentication must run before rate limiting
+ * so authenticated users can be identified by JWT.
+ */
+
 app.UseAuthentication();
 app.UseAuthorization();
 
-app.MapControllers();
+app.UseRateLimiter();
+
 
 app.Run();

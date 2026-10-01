@@ -2917,97 +2917,161 @@ public sealed class GroqChatCompletionService
     }
 
     private static bool IsGeneralPermissionReply(
-        string text)
+     string text)
     {
+        if (string.IsNullOrWhiteSpace(text))
+        {
+            return false;
+        }
+
         var normalized = NormalizeShortMessage(text);
 
         if (normalized is
+            // English positive
             "yes" or
+            "yas" or
+            "yess" or
             "yeah" or
+            "yea" or
+            "yep" or
+            "yup" or
             "okay" or
             "ok" or
             "sure" or
+            "go ahead" or
             "tell me" or
             "search" or
+
+            // Tanglish positive
             "sollu" or
             "solllu" or
+            "sollunga" or
+            "search pannu" or
+            "thedi sollu" or
+
+            // Tamil positive
             "ஆம்" or
+            "ஆமாம்" or
+            "சரி" or
             "சொல்லு" or
+
+            // Sinhala / Singlish positive
+            "ow" or
+            "ඔව්" or
+            "hari" or
+            "kiyanna" or
+
+            // Other languages
+            "oui" or
+            "हाँ" or
+            "हां" or
+
+            // Negative
             "வேண்டாம்" or
             "no" or
             "no thanks" or
             "don't" or
             "dont" or
-            "epa" or
-            "kiyanna")
+            "epa")
         {
             return true;
         }
 
-        return normalized.StartsWith(
-                   "yes ",
-                   StringComparison.OrdinalIgnoreCase) ||
-               normalized.StartsWith(
-                   "yes,",
-                   StringComparison.OrdinalIgnoreCase) ||
-               normalized.StartsWith(
-                   "okay ",
-                   StringComparison.OrdinalIgnoreCase) ||
-               normalized.StartsWith(
-                   "okay,",
-                   StringComparison.OrdinalIgnoreCase) ||
-               normalized.StartsWith(
-                   "ok ",
-                   StringComparison.OrdinalIgnoreCase) ||
-               normalized.StartsWith(
-                   "ok,",
-                   StringComparison.OrdinalIgnoreCase) ||
-               normalized.StartsWith(
-                   "sure ",
-                   StringComparison.OrdinalIgnoreCase) ||
-               normalized.StartsWith(
-                   "ஆம் ",
-                   StringComparison.OrdinalIgnoreCase) ||
-               normalized.StartsWith(
-                   "ஆம்,",
-                   StringComparison.OrdinalIgnoreCase) ||
-               normalized.StartsWith(
-                   "ஆமாம் ",
-                   StringComparison.OrdinalIgnoreCase) ||
-               normalized.StartsWith(
-                   "சரி ",
-                   StringComparison.OrdinalIgnoreCase) ||
-               normalized.StartsWith(
-                   "ow ",
-                   StringComparison.OrdinalIgnoreCase) ||
-               normalized.StartsWith(
-                   "hari ",
-                   StringComparison.OrdinalIgnoreCase) ||
-               normalized.StartsWith(
-                   "ඔව් ",
-                   StringComparison.OrdinalIgnoreCase) ||
-               normalized.StartsWith(
-                   "oui ",
-                   StringComparison.OrdinalIgnoreCase) ||
-               normalized.StartsWith(
-                   "हाँ ",
-                   StringComparison.OrdinalIgnoreCase) ||
-               normalized.StartsWith(
-                   "no ",
-                   StringComparison.OrdinalIgnoreCase) ||
-               ContainsAny(
-                   normalized,
-                   "general knowledge use",
-                   "outside answer",
-                   "வெளியில் இருந்து சொல்லு",
-                   "இணையத்தில் தேடி",
-                   "இணையத்தில் தேடு",
-                   "web la search",
-                   "internet la search",
-                   "web eken hoyala",
-                   "internet eken hoyala");
-    }
+        return
+            normalized.StartsWith(
+                "yes ",
+                StringComparison.OrdinalIgnoreCase) ||
+            normalized.StartsWith(
+                "yas ",
+                StringComparison.OrdinalIgnoreCase) ||
+            normalized.StartsWith(
+                "yess ",
+                StringComparison.OrdinalIgnoreCase) ||
+            normalized.StartsWith(
+                "yeah ",
+                StringComparison.OrdinalIgnoreCase) ||
+            normalized.StartsWith(
+                "yep ",
+                StringComparison.OrdinalIgnoreCase) ||
+            normalized.StartsWith(
+                "okay ",
+                StringComparison.OrdinalIgnoreCase) ||
+            normalized.StartsWith(
+                "ok ",
+                StringComparison.OrdinalIgnoreCase) ||
+            normalized.StartsWith(
+                "sure ",
+                StringComparison.OrdinalIgnoreCase) ||
+            normalized.StartsWith(
+                "go ahead ",
+                StringComparison.OrdinalIgnoreCase) ||
+            normalized.StartsWith(
+                "ஆம் ",
+                StringComparison.OrdinalIgnoreCase) ||
+            normalized.StartsWith(
+                "ஆமாம் ",
+                StringComparison.OrdinalIgnoreCase) ||
+            normalized.StartsWith(
+                "சரி ",
+                StringComparison.OrdinalIgnoreCase) ||
+            normalized.StartsWith(
+                "ow ",
+                StringComparison.OrdinalIgnoreCase) ||
+            normalized.StartsWith(
+                "hari ",
+                StringComparison.OrdinalIgnoreCase) ||
+            normalized.StartsWith(
+                "ඔව් ",
+                StringComparison.OrdinalIgnoreCase) ||
+            normalized.StartsWith(
+                "oui ",
+                StringComparison.OrdinalIgnoreCase) ||
+            normalized.StartsWith(
+                "हाँ ",
+                StringComparison.OrdinalIgnoreCase) ||
+            normalized.StartsWith(
+                "no ",
+                StringComparison.OrdinalIgnoreCase) ||
 
+            ContainsAny(
+                normalized,
+
+                // English
+                "search the web",
+                "search web",
+                "search the internet",
+                "search internet",
+                "search online",
+
+                // Tanglish
+                "web la search",
+                "web-la search",
+                "internet la search",
+                "internet-la search",
+                "web la thedu",
+                "web-la thedu",
+                "web la thedi",
+                "web-la thedi",
+                "search pannu",
+                "thedi sollu",
+                "velila irunthu sollu",
+                "veli la irunthu sollu",
+
+                // Tamil
+                "வெளியில் இருந்து சொல்லு",
+                "இணையத்தில் தேடி",
+                "இணையத்தில் தேடு",
+                "இணையத்தில் தேடவும்",
+
+                // Sinhala / Singlish
+                "web eken hoyala",
+                "internet eken hoyala",
+                "web eke search",
+
+                // Existing phrases
+                "general knowledge use",
+                "outside answer");
+    }
     private static bool IsNegativePermissionReply(
         string text)
     {

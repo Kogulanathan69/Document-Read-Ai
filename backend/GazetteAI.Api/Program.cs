@@ -1,6 +1,8 @@
 using System.Text;
 using System.Threading.RateLimiting;
+using GazetteAI.Api.BackgroundServices;
 using GazetteAI.Application.Authentication.Interfaces;
+using GazetteAI.Application.Documents.BackgroundProcessing;
 using GazetteAI.Application.Documents.Interfaces;
 using GazetteAI.Application.Documents.Services;
 using GazetteAI.Infrastructure.AI;
@@ -21,6 +23,10 @@ var connectionString =
         .GetConnectionString("DefaultConnection")
     ?? throw new InvalidOperationException(
         "DefaultConnection is missing.");
+
+/*
+ * Database
+ */
 
 builder.Services.AddDbContext<AppDbContext>(
     options =>
@@ -49,6 +55,30 @@ builder.Services.AddScoped<
     TextChunker>();
 
 /*
+ * Background document processing
+ *
+ * Queue:
+ * One shared queue for the whole API process.
+ *
+ * Processing service:
+ * New scoped instance for each worker scope/job.
+ *
+ * Worker:
+ * Continuously waits for queued document jobs.
+ */
+
+builder.Services.AddSingleton<
+    IDocumentProcessingQueue,
+    DocumentProcessingQueue>();
+
+builder.Services.AddScoped<
+    IDocumentProcessingService,
+    DocumentProcessingService>();
+
+builder.Services.AddHostedService<
+    DocumentProcessingWorker>();
+
+/*
  * Ollama embedding service
  */
 
@@ -73,8 +103,10 @@ builder.Services.AddHttpClient<
     GroqChatCompletionService>();
 
 /*
- * Tavily is used only after the user grants permission
- * to search outside the uploaded document.
+ * Tavily web search
+ *
+ * Tavily is used only after the user grants
+ * permission to search outside the uploaded document.
  */
 
 builder.Services.Configure<TavilyOptions>(
@@ -168,12 +200,10 @@ builder.Services.AddAuthorization();
  * Each user receives an independent rate-limit bucket.
  *
  * Unauthenticated users:
- * The client IP address is used as the bucket key.
+ * Client IP address is used as the bucket key.
  *
- * Current starting limit:
+ * Current limit:
  * 60 requests per minute.
- *
- * This can be tuned later after load testing.
  */
 
 builder.Services.AddRateLimiter(options =>
@@ -187,11 +217,13 @@ builder.Services.AddRateLimiter(options =>
         {
             string partitionKey;
 
-            if (httpContext.User.Identity?.IsAuthenticated == true)
+            if (httpContext.User.Identity
+                    ?.IsAuthenticated == true)
             {
                 partitionKey =
                     httpContext.User.FindFirst(
-                        System.Security.Claims.ClaimTypes.NameIdentifier)
+                        System.Security.Claims
+                            .ClaimTypes.NameIdentifier)
                         ?.Value
                     ?? httpContext.User.Identity.Name
                     ?? "authenticated-user";
@@ -199,7 +231,8 @@ builder.Services.AddRateLimiter(options =>
             else
             {
                 partitionKey =
-                    httpContext.Connection.RemoteIpAddress
+                    httpContext.Connection
+                        .RemoteIpAddress
                         ?.ToString()
                     ?? "anonymous";
             }
@@ -216,7 +249,8 @@ builder.Services.AddRateLimiter(options =>
                                 TimeSpan.FromMinutes(1),
 
                             QueueProcessingOrder =
-                                QueueProcessingOrder.OldestFirst,
+                                QueueProcessingOrder
+                                    .OldestFirst,
 
                             QueueLimit = 0,
 
@@ -230,14 +264,17 @@ builder.Services.AddRateLimiter(options =>
             context.HttpContext.Response.ContentType =
                 "application/json";
 
-            await context.HttpContext.Response.WriteAsJsonAsync(
-                new
-                {
-                    status = 429,
-                    message =
-                        "Too many requests. Please wait a moment and try again."
-                },
-                cancellationToken);
+            await context.HttpContext.Response
+                .WriteAsJsonAsync(
+                    new
+                    {
+                        status = 429,
+                        message =
+                            "Too many requests. " +
+                            "Please wait a moment " +
+                            "and try again."
+                    },
+                    cancellationToken);
         };
 });
 
@@ -259,12 +296,24 @@ builder.Services.AddCors(options =>
         });
 });
 
+/*
+ * Build application
+ */
+
 var app = builder.Build();
+
+/*
+ * OpenAPI
+ */
 
 if (app.Environment.IsDevelopment())
 {
     app.MapOpenApi();
 }
+
+/*
+ * Middleware pipeline
+ */
 
 app.UseCors("AngularFrontend");
 
@@ -276,9 +325,17 @@ app.UseHttpsRedirection();
  */
 
 app.UseAuthentication();
+
 app.UseAuthorization();
 
 app.UseRateLimiter();
 
+/*
+ * Map API controllers and apply
+ * the API rate-limit policy.
+ */
+
+app.MapControllers()
+    .RequireRateLimiting("ApiRateLimit");
 
 app.Run();

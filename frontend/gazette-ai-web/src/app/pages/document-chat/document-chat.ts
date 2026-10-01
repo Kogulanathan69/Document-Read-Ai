@@ -1,6 +1,7 @@
 import {
   ChangeDetectorRef,
   Component,
+  OnDestroy,
   OnInit,
   inject
 } from '@angular/core';
@@ -42,9 +43,11 @@ interface ChatMessage {
   templateUrl: './document-chat.html',
   styleUrl: './document-chat.scss'
 })
-export class DocumentChat implements OnInit {
+export class DocumentChat
+  implements OnInit, OnDestroy {
 
-  private readonly documentApi = inject(DocumentApi);
+  private readonly documentApi =
+    inject(DocumentApi);
 
   private readonly changeDetector =
     inject(ChangeDetectorRef);
@@ -58,7 +61,22 @@ export class DocumentChat implements OnInit {
 
   private messageId = 0;
 
-  private conversationId: string | null = null;
+  private conversationId:
+    string | null = null;
+
+
+  /*
+   * Background-processing polling.
+   *
+   * While the selected document is Queued or
+   * Processing, the frontend refreshes document
+   * status every 2 seconds.
+   */
+  private pollingTimer:
+    ReturnType<typeof setInterval> | null = null;
+
+  private pollingDocumentId:
+    string | null = null;
 
 
   readonly currentUser =
@@ -89,7 +107,8 @@ export class DocumentChat implements OnInit {
 
   isAsking = false;
 
-  deletingDocumentId: string | null = null;
+  deletingDocumentId:
+    string | null = null;
 
 
   errorMessage = '';
@@ -106,6 +125,14 @@ export class DocumentChat implements OnInit {
 
 
   /*
+   * Stop timers when user leaves this page.
+   */
+  ngOnDestroy(): void {
+    this.stopDocumentPolling();
+  }
+
+
+  /*
    * Load user's uploaded documents.
    */
   loadDocuments(): void {
@@ -113,7 +140,6 @@ export class DocumentChat implements OnInit {
     this.isLoadingDocuments = true;
 
     this.errorMessage = '';
-
 
     this.documentApi
       .getDocuments()
@@ -125,10 +151,17 @@ export class DocumentChat implements OnInit {
 
           this.isLoadingDocuments = false;
 
+          /*
+           * If a document is currently open,
+           * update its status/pages/chunks using
+           * the latest backend data.
+           */
+          this.syncSelectedDocument(
+            documents
+          );
+
           this.changeDetector.markForCheck();
-
         },
-
 
         error: error => {
 
@@ -141,11 +174,9 @@ export class DocumentChat implements OnInit {
           this.isLoadingDocuments = false;
 
           this.changeDetector.markForCheck();
-
         }
 
       });
-
   }
 
 
@@ -157,23 +188,32 @@ export class DocumentChat implements OnInit {
     const input =
       event.target as HTMLInputElement;
 
-
     this.selectedFile =
       input.files?.[0] ?? null;
-
 
     this.errorMessage = '';
 
     this.questionError = '';
 
-
     this.changeDetector.markForCheck();
-
   }
 
 
   /*
-   * Upload and process PDF.
+   * Upload PDF.
+   *
+   * Backend now returns HTTP 202 immediately.
+   *
+   * The document may initially be:
+   *
+   * Queued
+   *   ↓
+   * Processing
+   *   ↓
+   * Ready
+   *
+   * Heavy OCR / chunk / embedding work happens
+   * in the backend worker.
    */
   uploadDocument(): void {
 
@@ -183,14 +223,15 @@ export class DocumentChat implements OnInit {
         'Please select a PDF file.';
 
       return;
-
     }
 
+    this.stopDocumentPolling();
 
     this.isUploading = true;
 
     this.errorMessage = '';
 
+    this.questionError = '';
 
     this.documentApi
       .uploadDocument(this.selectedFile)
@@ -198,33 +239,56 @@ export class DocumentChat implements OnInit {
 
         next: response => {
 
-          this.uploadedDocument = response;
+          this.uploadedDocument =
+            response;
 
           this.selectedFile = null;
 
           this.isUploading = false;
 
-
           this.resetConversation();
 
-
-          this.addMessage(
-            'assistant',
-            `Document ready. You can now ask questions about ${response.fileName}.`
+          /*
+           * Do NOT say "Document ready" here.
+           *
+           * HTTP 202 only means the upload was
+           * accepted for background processing.
+           */
+          this.addProcessingStatusMessage(
+            response.status,
+            response.fileName
           );
 
-
+          /*
+           * Refresh sidebar immediately.
+           */
           this.loadDocuments();
 
+          /*
+           * Conversations should normally be empty
+           * for a new document, but keeping this call
+           * preserves the existing UI behaviour.
+           */
           this.loadConversations(
             response.documentId
           );
 
+          /*
+           * Begin polling only when processing
+           * has not finished yet.
+           */
+          if (
+            this.isPendingStatus(
+              response.status
+            )
+          ) {
+            this.startDocumentPolling(
+              response.documentId
+            );
+          }
 
           this.changeDetector.markForCheck();
-
         },
-
 
         error: error => {
 
@@ -234,16 +298,12 @@ export class DocumentChat implements OnInit {
               'Document upload failed.'
             );
 
-
           this.isUploading = false;
 
-
           this.changeDetector.markForCheck();
-
         }
 
       });
-
   }
 
 
@@ -253,6 +313,8 @@ export class DocumentChat implements OnInit {
   openDocument(
     document: DocumentSummary
   ): void {
+
+    this.stopDocumentPolling();
 
     this.uploadedDocument = {
 
@@ -280,23 +342,61 @@ export class DocumentChat implements OnInit {
 
     };
 
-
     this.resetConversation();
 
+    /*
+     * Message depends on actual processing status.
+     */
+    if (
+      this.isPendingStatus(
+        document.status
+      )
+    ) {
 
-    this.addMessage(
-      'assistant',
-      `Opened ${document.fileName}. Choose a previous chat or ask a new question.`
-    );
+      this.addProcessingStatusMessage(
+        document.status,
+        document.fileName
+      );
 
+      this.startDocumentPolling(
+        document.documentId
+      );
+
+    } else if (
+      this.isReadyStatus(
+        document.status
+      )
+    ) {
+
+      this.addMessage(
+        'assistant',
+        `Opened ${document.fileName}. Choose a previous chat or ask a new question.`
+      );
+
+    } else if (
+      this.isFailedStatus(
+        document.status
+      )
+    ) {
+
+      this.addMessage(
+        'assistant',
+        `Processing failed for ${document.fileName}. Please delete it and upload the PDF again.`
+      );
+
+    } else {
+
+      this.addMessage(
+        'assistant',
+        `Opened ${document.fileName}.`
+      );
+    }
 
     this.loadConversations(
       document.documentId
     );
 
-
     this.changeDetector.markForCheck();
-
   }
 
 
@@ -311,7 +411,6 @@ export class DocumentChat implements OnInit {
 
     this.conversations = [];
 
-
     this.documentApi
       .getConversations(documentId)
       .subscribe({
@@ -321,15 +420,11 @@ export class DocumentChat implements OnInit {
           this.conversations =
             conversations;
 
-
           this.isLoadingConversations =
             false;
 
-
           this.changeDetector.markForCheck();
-
         },
-
 
         error: error => {
 
@@ -339,17 +434,13 @@ export class DocumentChat implements OnInit {
               'Could not load conversation history.'
             );
 
-
           this.isLoadingConversations =
             false;
 
-
           this.changeDetector.markForCheck();
-
         }
 
       });
-
   }
 
 
@@ -364,11 +455,25 @@ export class DocumentChat implements OnInit {
       return;
     }
 
+    /*
+     * Questions/history should only be used after
+     * document processing has completed.
+     */
+    if (
+      !this.isReadyStatus(
+        this.uploadedDocument.status
+      )
+    ) {
+
+      this.questionError =
+        'Please wait until the document is ready.';
+
+      return;
+    }
 
     this.isLoadingHistory = true;
 
     this.questionError = '';
-
 
     this.documentApi
       .getConversationMessages(
@@ -382,7 +487,6 @@ export class DocumentChat implements OnInit {
           this.conversationId =
             response.conversationId;
 
-
           /*
            * Historical messages currently contain
            * message content only.
@@ -394,10 +498,12 @@ export class DocumentChat implements OnInit {
             response.messages.map(
               message => ({
 
-                id: ++this.messageId,
+                id:
+                  ++this.messageId,
 
                 role:
-                  message.role.toLowerCase() === 'user'
+                  message.role
+                    .toLowerCase() === 'user'
                     ? 'user'
                     : 'assistant',
 
@@ -407,14 +513,10 @@ export class DocumentChat implements OnInit {
               })
             );
 
-
           this.isLoadingHistory = false;
 
-
           this.changeDetector.markForCheck();
-
         },
-
 
         error: error => {
 
@@ -424,16 +526,12 @@ export class DocumentChat implements OnInit {
               'Could not open this conversation.'
             );
 
-
           this.isLoadingHistory = false;
 
-
           this.changeDetector.markForCheck();
-
         }
 
       });
-
   }
 
 
@@ -449,18 +547,28 @@ export class DocumentChat implements OnInit {
         `Delete ${document.fileName}? Its chat history will also be deleted.`
       );
 
-
     if (!confirmed) {
       return;
     }
 
+    /*
+     * If this document is currently being polled,
+     * stop polling before deleting it.
+     *
+     * This prevents the frontend from continuing
+     * to request status for a deleted document.
+     */
+    if (
+      this.pollingDocumentId ===
+      document.documentId
+    ) {
+      this.stopDocumentPolling();
+    }
 
     this.deletingDocumentId =
       document.documentId;
 
-
     this.errorMessage = '';
-
 
     this.documentApi
       .deleteDocument(
@@ -477,7 +585,6 @@ export class DocumentChat implements OnInit {
                 document.documentId
             );
 
-
           if (
             this.uploadedDocument
               ?.documentId ===
@@ -489,17 +596,12 @@ export class DocumentChat implements OnInit {
             this.conversations = [];
 
             this.resetConversation();
-
           }
-
 
           this.deletingDocumentId = null;
 
-
           this.changeDetector.markForCheck();
-
         },
-
 
         error: error => {
 
@@ -509,16 +611,12 @@ export class DocumentChat implements OnInit {
               'Could not delete the document.'
             );
 
-
           this.deletingDocumentId = null;
 
-
           this.changeDetector.markForCheck();
-
         }
 
       });
-
   }
 
 
@@ -532,16 +630,12 @@ export class DocumentChat implements OnInit {
     const input =
       event.target as HTMLInputElement;
 
-
     this.question =
       input.value;
 
-
     this.questionError = '';
 
-
     this.changeDetector.markForCheck();
-
   }
 
 
@@ -564,18 +658,44 @@ export class DocumentChat implements OnInit {
         'First upload or open a PDF document.';
 
       return;
-
     }
 
+    /*
+     * Prevent questions while background processing
+     * is still running.
+     */
+    if (
+      !this.isReadyStatus(
+        this.uploadedDocument.status
+      )
+    ) {
+
+      if (
+        this.isFailedStatus(
+          this.uploadedDocument.status
+        )
+      ) {
+
+        this.questionError =
+          'Document processing failed. Please upload the PDF again.';
+
+      } else {
+
+        this.questionError =
+          'Please wait. The document is still being processed.';
+      }
+
+      this.changeDetector.markForCheck();
+
+      return;
+    }
 
     if (this.isAsking) {
       return;
     }
 
-
     const currentQuestion =
       this.question.trim();
-
 
     if (!currentQuestion) {
 
@@ -583,9 +703,7 @@ export class DocumentChat implements OnInit {
         'Please enter your question.';
 
       return;
-
     }
-
 
     /*
      * Show user's message immediately.
@@ -595,16 +713,13 @@ export class DocumentChat implements OnInit {
       currentQuestion
     );
 
-
     this.question = '';
 
     this.isAsking = true;
 
     this.questionError = '';
 
-
     this.changeDetector.markForCheck();
-
 
     this.documentApi
       .askDocument(
@@ -622,7 +737,6 @@ export class DocumentChat implements OnInit {
           this.conversationId =
             response.conversationId;
 
-
           /*
            * Add assistant response.
            *
@@ -639,22 +753,18 @@ export class DocumentChat implements OnInit {
             response.webSources
           );
 
-
           this.isAsking = false;
-
 
           /*
            * Refresh history sidebar.
            */
           this.loadConversations(
-            this.uploadedDocument!.documentId
+            this.uploadedDocument!
+              .documentId
           );
 
-
           this.changeDetector.markForCheck();
-
         },
-
 
         error: error => {
 
@@ -664,26 +774,20 @@ export class DocumentChat implements OnInit {
               'Sorry, I could not answer that question.'
             );
 
-
           this.addMessage(
             'assistant',
             friendlyError
           );
 
-
           this.questionError =
             friendlyError;
 
-
           this.isAsking = false;
 
-
           this.changeDetector.markForCheck();
-
         }
 
       });
-
   }
 
 
@@ -694,19 +798,29 @@ export class DocumentChat implements OnInit {
 
     this.resetConversation();
 
-
     if (this.uploadedDocument) {
 
-      this.addMessage(
-        'assistant',
-        `New conversation started for ${this.uploadedDocument.fileName}.`
-      );
+      if (
+        this.isReadyStatus(
+          this.uploadedDocument.status
+        )
+      ) {
 
+        this.addMessage(
+          'assistant',
+          `New conversation started for ${this.uploadedDocument.fileName}.`
+        );
+
+      } else {
+
+        this.addProcessingStatusMessage(
+          this.uploadedDocument.status,
+          this.uploadedDocument.fileName
+        );
+      }
     }
 
-
     this.changeDetector.markForCheck();
-
   }
 
 
@@ -715,12 +829,13 @@ export class DocumentChat implements OnInit {
    */
   logout(): void {
 
+    this.stopDocumentPolling();
+
     this.authService.logout();
 
     void this.router.navigate([
       '/auth'
     ]);
-
   }
 
 
@@ -739,15 +854,493 @@ export class DocumentChat implements OnInit {
       return `${(
         bytes / 1024
       ).toFixed(1)} KB`;
-
     }
-
 
     return `${(
       bytes /
       (1024 * 1024)
     ).toFixed(1)} MB`;
+  }
 
+
+  /*
+   * Start polling the backend for one document.
+   *
+   * We refresh immediately and then every 2 seconds.
+   */
+  private startDocumentPolling(
+    documentId: string
+  ): void {
+
+    this.stopDocumentPolling();
+
+    this.pollingDocumentId =
+      documentId;
+
+    /*
+     * First refresh without waiting 2 seconds.
+     */
+    this.pollDocumentStatus();
+
+    this.pollingTimer =
+      setInterval(
+        () => {
+          this.pollDocumentStatus();
+        },
+        2000
+      );
+  }
+
+
+  /*
+   * Stop document-status polling.
+   */
+  private stopDocumentPolling(): void {
+
+    if (this.pollingTimer !== null) {
+
+      clearInterval(
+        this.pollingTimer
+      );
+
+      this.pollingTimer = null;
+    }
+
+    this.pollingDocumentId = null;
+  }
+
+
+  /*
+   * Poll document list.
+   *
+   * Existing GET /api/Documents is enough for this
+   * stage, so no additional backend endpoint is needed.
+   */
+  private pollDocumentStatus(): void {
+
+    const documentId =
+      this.pollingDocumentId;
+
+    if (!documentId) {
+      return;
+    }
+
+    this.documentApi
+      .getDocuments()
+      .subscribe({
+
+        next: documents => {
+
+          this.documents =
+            documents;
+
+          const latestDocument =
+            documents.find(
+              document =>
+                document.documentId ===
+                documentId
+            );
+
+          /*
+           * Document may have been deleted while
+           * processing.
+           */
+          if (!latestDocument) {
+
+            this.stopDocumentPolling();
+
+            this.changeDetector.markForCheck();
+
+            return;
+          }
+
+          /*
+           * Only update the active document if the
+           * user is still viewing the document being
+           * polled.
+           */
+          if (
+            this.uploadedDocument
+              ?.documentId ===
+            latestDocument.documentId
+          ) {
+
+            const previousStatus =
+              this.uploadedDocument.status;
+
+            this.updateUploadedDocument(
+              latestDocument
+            );
+
+            const newStatus =
+              latestDocument.status;
+
+            /*
+             * Only replace the processing message
+             * when the status actually changes.
+             */
+            if (
+              previousStatus
+                .toLowerCase() !==
+              newStatus.toLowerCase()
+            ) {
+
+              this.showProcessingStatusChange(
+                newStatus,
+                latestDocument.fileName
+              );
+            }
+          }
+
+          /*
+           * Processing finished successfully.
+           */
+          if (
+            this.isReadyStatus(
+              latestDocument.status
+            )
+          ) {
+
+            this.stopDocumentPolling();
+
+            /*
+             * Ensure final Ready state is visible
+             * even if the backend moved very quickly
+             * from Queued -> Processing -> Ready.
+             */
+            if (
+              this.uploadedDocument
+                ?.documentId ===
+              latestDocument.documentId
+            ) {
+
+              this.showReadyMessage(
+                latestDocument.fileName
+              );
+            }
+          }
+
+          /*
+           * Processing failed.
+           */
+          if (
+            this.isFailedStatus(
+              latestDocument.status
+            )
+          ) {
+
+            this.stopDocumentPolling();
+
+            if (
+              this.uploadedDocument
+                ?.documentId ===
+              latestDocument.documentId
+            ) {
+
+              this.showFailedMessage(
+                latestDocument.fileName
+              );
+            }
+          }
+
+          this.changeDetector.markForCheck();
+        },
+
+        error: () => {
+
+          /*
+           * A temporary polling failure should not
+           * destroy the current UI state.
+           *
+           * The next polling cycle can retry.
+           */
+        }
+
+      });
+  }
+
+
+  /*
+   * Synchronize selected document whenever the normal
+   * document list is refreshed.
+   */
+  private syncSelectedDocument(
+    documents: DocumentSummary[]
+  ): void {
+
+    if (!this.uploadedDocument) {
+      return;
+    }
+
+    const latestDocument =
+      documents.find(
+        document =>
+          document.documentId ===
+          this.uploadedDocument!
+            .documentId
+      );
+
+    if (!latestDocument) {
+      return;
+    }
+
+    this.updateUploadedDocument(
+      latestDocument
+    );
+
+    /*
+     * If page was refreshed/opened while a document
+     * is still processing, make sure polling starts.
+     */
+    if (
+      this.isPendingStatus(
+        latestDocument.status
+      ) &&
+      this.pollingTimer === null
+    ) {
+
+      this.startDocumentPolling(
+        latestDocument.documentId
+      );
+    }
+  }
+
+
+  /*
+   * Copy latest backend document values into the
+   * active UploadDocumentResponse object.
+   */
+  private updateUploadedDocument(
+    document: DocumentSummary
+  ): void {
+
+    if (!this.uploadedDocument) {
+      return;
+    }
+
+    this.uploadedDocument = {
+      ...this.uploadedDocument,
+
+      documentId:
+        document.documentId,
+
+      fileName:
+        document.fileName,
+
+      totalPages:
+        document.totalPages,
+
+      totalChunks:
+        document.totalChunks,
+
+      status:
+        document.status,
+
+      uploadedAt:
+        document.uploadedAt
+    };
+  }
+
+
+  /*
+   * Initial processing message.
+   */
+  private addProcessingStatusMessage(
+    status: string,
+    fileName: string
+  ): void {
+
+    if (
+      this.isReadyStatus(status)
+    ) {
+
+      this.addMessage(
+        'assistant',
+        `Document ready. You can now ask questions about ${fileName}.`
+      );
+
+      return;
+    }
+
+    if (
+      this.isFailedStatus(status)
+    ) {
+
+      this.addMessage(
+        'assistant',
+        `Document processing failed for ${fileName}. Please upload the PDF again.`
+      );
+
+      return;
+    }
+
+    if (
+      status.toLowerCase() ===
+      'processing'
+    ) {
+
+      this.addMessage(
+        'assistant',
+        `Processing ${fileName}. Please wait while the document is prepared.`
+      );
+
+      return;
+    }
+
+    this.addMessage(
+      'assistant',
+      `${fileName} is queued for processing. Please wait.`
+    );
+  }
+
+
+  /*
+   * Display status transition.
+   */
+  private showProcessingStatusChange(
+    status: string,
+    fileName: string
+  ): void {
+
+    if (
+      status.toLowerCase() ===
+      'processing'
+    ) {
+
+      this.replaceProcessingMessage(
+        `Processing ${fileName}. Please wait while the document is prepared.`
+      );
+
+      return;
+    }
+
+    if (
+      this.isReadyStatus(status)
+    ) {
+
+      this.showReadyMessage(
+        fileName
+      );
+
+      return;
+    }
+
+    if (
+      this.isFailedStatus(status)
+    ) {
+
+      this.showFailedMessage(
+        fileName
+      );
+    }
+  }
+
+
+  /*
+   * Ready message.
+   */
+  private showReadyMessage(
+    fileName: string
+  ): void {
+
+    this.replaceProcessingMessage(
+      `Document ready. You can now ask questions about ${fileName}.`
+    );
+  }
+
+
+  /*
+   * Failed message.
+   */
+  private showFailedMessage(
+    fileName: string
+  ): void {
+
+    this.replaceProcessingMessage(
+      `Document processing failed for ${fileName}. Please upload the PDF again.`
+    );
+  }
+
+
+  /*
+   * During processing we only need one assistant
+   * status message instead of:
+   *
+   * Queued
+   * Processing
+   * Ready
+   *
+   * appearing as three separate chat messages.
+   */
+  private replaceProcessingMessage(
+    content: string
+  ): void {
+
+    const assistantMessage =
+      this.messages.find(
+        message =>
+          message.role ===
+          'assistant'
+      );
+
+    if (assistantMessage) {
+
+      assistantMessage.content =
+        content;
+
+    } else {
+
+      this.addMessage(
+        'assistant',
+        content
+      );
+    }
+  }
+
+
+  /*
+   * Status helpers.
+   */
+  private isPendingStatus(
+    status: string | null | undefined
+  ): boolean {
+
+    const normalized =
+      status
+        ?.trim()
+        .toLowerCase();
+
+    return (
+      normalized === 'queued' ||
+      normalized === 'processing' ||
+      normalized === 'pending'
+    );
+  }
+
+
+  private isReadyStatus(
+    status: string | null | undefined
+  ): boolean {
+
+    return (
+      status
+        ?.trim()
+        .toLowerCase() ===
+      'ready'
+    );
+  }
+
+
+  private isFailedStatus(
+    status: string | null | undefined
+  ): boolean {
+
+    return (
+      status
+        ?.trim()
+        .toLowerCase() ===
+      'failed'
+    );
   }
 
 
@@ -765,7 +1358,6 @@ export class DocumentChat implements OnInit {
     this.question = '';
 
     this.questionError = '';
-
   }
 
 
@@ -790,7 +1382,8 @@ export class DocumentChat implements OnInit {
 
     this.messages.push({
 
-      id: ++this.messageId,
+      id:
+        ++this.messageId,
 
       role,
 
@@ -801,7 +1394,6 @@ export class DocumentChat implements OnInit {
       webSources
 
     });
-
   }
 
 
@@ -820,9 +1412,7 @@ export class DocumentChat implements OnInit {
     ) {
 
       return error.error.message;
-
     }
-
 
     if (
       typeof error?.error ===
@@ -830,12 +1420,8 @@ export class DocumentChat implements OnInit {
     ) {
 
       return error.error;
-
     }
 
-
     return defaultMessage;
-
   }
-
 }

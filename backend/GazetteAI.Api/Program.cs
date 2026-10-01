@@ -35,6 +35,28 @@ builder.Services.AddDbContext<AppDbContext>(
             npgsqlOptions =>
                 npgsqlOptions.UseVector()));
 
+/*
+ * Redis distributed cache
+ *
+ * Used to reduce repeated database / AI work
+ * by keeping selected short-lived data in Redis.
+ */
+
+var redisConnection =
+    builder.Configuration
+        .GetConnectionString("Redis")
+    ?? "localhost:6379";
+
+builder.Services.AddStackExchangeRedisCache(
+    options =>
+    {
+        options.Configuration =
+            redisConnection;
+
+        options.InstanceName =
+            "GazetteAI:";
+    });
+
 builder.Services.AddControllers();
 builder.Services.AddOpenApi();
 

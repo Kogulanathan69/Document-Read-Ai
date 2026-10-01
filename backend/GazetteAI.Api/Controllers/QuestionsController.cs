@@ -6,7 +6,11 @@ using GazetteAI.Infrastructure.Data;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.Extensions.Caching.Distributed;
 using System.Security.Claims;
+using System.Security.Cryptography;
+using System.Text;
+using System.Text.Json;
 
 namespace GazetteAI.Api.Controllers;
 
@@ -19,6 +23,7 @@ public sealed class QuestionsController : ControllerBase
     private readonly IEmbeddingService _embeddingService;
     private readonly IChatCompletionService _chatService;
     private readonly IWebSearchService _webSearchService;
+    private readonly IDistributedCache _cache;
     private readonly ILogger<QuestionsController> _logger;
 
     public QuestionsController(
@@ -26,12 +31,14 @@ public sealed class QuestionsController : ControllerBase
         IEmbeddingService embeddingService,
         IChatCompletionService chatService,
         IWebSearchService webSearchService,
+        IDistributedCache cache,
         ILogger<QuestionsController> logger)
     {
         _dbContext = dbContext;
         _embeddingService = embeddingService;
         _chatService = chatService;
         _webSearchService = webSearchService;
+        _cache = cache;
         _logger = logger;
     }
 
@@ -93,9 +100,10 @@ public sealed class QuestionsController : ControllerBase
                     : Guid.NewGuid();
 
             /*
-             * Latest 12 messages மட்டும் எடுத்தால்
-             * Groq token usage குறையும்.
+             * Latest 12 messages only.
+             * This keeps Groq token usage smaller.
              */
+
             var storedHistory =
                 await _dbContext.ChatMessages
                     .AsNoTracking()
@@ -112,9 +120,10 @@ public sealed class QuestionsController : ControllerBase
                     .ToListAsync(cancellationToken);
 
             /*
-             * Database query newest-to-oldest order-ல்
-             * வந்ததால் conversation order-க்கு reverse.
+             * Database result is newest-to-oldest.
+             * Reverse it back to conversation order.
              */
+
             storedHistory.Reverse();
 
             var chatHistory = storedHistory
@@ -125,11 +134,11 @@ public sealed class QuestionsController : ControllerBase
                 .ToList();
 
             /*
-             * Language, writing style, follow-up,
-             * clarification, translation மற்றும்
-             * standalone search question அனைத்தையும்
-             * ஒரே Groq call analyse செய்யும்.
+             * Analyze language, writing style,
+             * follow-up, clarification, translation,
+             * and standalone search question.
              */
+
             var analysis =
                 await _chatService
                     .AnalyzeConversationAsync(
@@ -144,11 +153,12 @@ public sealed class QuestionsController : ControllerBase
                     : analysis.SearchQuestion.Trim();
 
             /*
-             * Clarification அல்லது translation request-க்கு
-             * analysis search question உருவாக்க முடியாத
-             * fallback situation-ல் previous user message
-             * பயன்படுத்தப்படும்.
+             * Clarification / translation fallback:
+             * use the previous user message when the
+             * analysis did not create a better
+             * standalone search question.
              */
+
             if ((analysis.IsClarification ||
                  analysis.IsTranslationRequest) &&
                 IsSameText(
@@ -173,13 +183,18 @@ public sealed class QuestionsController : ControllerBase
             }
 
             /*
-             * Greeting and acknowledgement messages do not
-             * require document retrieval. This prevents
-             * unnecessary Ollama embeddings, irrelevant page
-             * scores and misleading "answer not found" replies.
+             * Greeting / acknowledgement / permission
+             * responses do not always require document
+             * retrieval.
              */
+
             if (!analysis.RequiresDocumentSearch)
             {
+                /*
+                 * User granted permission to search
+                 * outside the uploaded document.
+                 */
+
                 if (analysis.ExternalPermissionGranted &&
                     !string.IsNullOrWhiteSpace(
                         analysis.ExternalQuestion))
@@ -224,12 +239,19 @@ public sealed class QuestionsController : ControllerBase
                         question = normalizedQuestion,
                         searchQuestion = externalQuestion,
                         intent = analysis.Intent,
-                        requiresDocumentSearch = false,
+
+                        requiresDocumentSearch =
+                            false,
+
                         detectedLanguage =
                             analysis.DetectedLanguage,
-                        writingStyle = analysis.WritingStyle,
+
+                        writingStyle =
+                            analysis.WritingStyle,
+
                         responseInstruction =
                             analysis.ResponseInstruction,
+
                         isFollowUp = true,
                         clarificationRequest = false,
                         translationRequest = false,
@@ -238,7 +260,10 @@ public sealed class QuestionsController : ControllerBase
                         externalPermissionGranted = true,
                         answerSource = "live-web",
                         answer = webAnswer,
-                        sources = Array.Empty<object>(),
+
+                        sources =
+                            Array.Empty<object>(),
+
                         webSources
                     });
                 }
@@ -323,6 +348,11 @@ public sealed class QuestionsController : ControllerBase
                 });
             }
 
+            /*
+             * Load searchable chunks belonging only
+             * to this authenticated user's document.
+             */
+
             var chunks =
                 await _dbContext.DocumentChunks
                     .AsNoTracking()
@@ -344,15 +374,36 @@ public sealed class QuestionsController : ControllerBase
             }
 
             /*
-             * nomic-embed-text-v2-moe model-க்கு
-             * question embedding search_query prefix-உடன்
-             * உருவாக்கப்படும்.
+             * Redis embedding cache
+             *
+             * Flow:
+             *
+             * Search question
+             *      |
+             *      v
+             * Redis GET
+             *   /     \
+             * HIT     MISS
+             *  |        |
+             * reuse    Ollama
+             *           |
+             *        Redis SET
+             *
+             * The embedding is based only on the
+             * normalized search text and embedding
+             * model input format. It does not contain
+             * document contents.
              */
+
             var questionEmbedding =
-                await _embeddingService
-                    .GenerateEmbeddingAsync(
-                        $"search_query: {searchQuestion}",
-                        cancellationToken);
+                await GetOrCreateQuestionEmbeddingAsync(
+                    searchQuestion,
+                    cancellationToken);
+
+            /*
+             * Compare question embedding against
+             * stored document chunk embeddings.
+             */
 
             var relevantChunks = chunks
                 .Select(chunk => new
@@ -377,15 +428,14 @@ public sealed class QuestionsController : ControllerBase
                 .ToList();
 
             /*
-             * Final answer:
+             * Generate final answer using:
              *
-             * - original latest user message
+             * - standalone search question
              * - relevant document chunks
              * - previous chat history
              * - multilingual conversation analysis
-             *
-             * அனைத்தையும் பயன்படுத்தி உருவாக்கப்படும்.
              */
+
             var answer =
                 await _chatService
                     .GenerateAnswerAsync(
@@ -410,10 +460,13 @@ public sealed class QuestionsController : ControllerBase
             }
 
             /*
-             * The PDF retrieval stage could not ground an answer.
-             * Ask permission before using general AI knowledge.
-             * No PDF page source is returned for this response.
+             * Document retrieval could not ground
+             * an answer.
+             *
+             * Ask permission before using web /
+             * external knowledge.
              */
+
             if (answer.Equals(
                     GroqChatCompletionService
                         .DocumentAnswerNotFoundMarker,
@@ -439,24 +492,45 @@ public sealed class QuestionsController : ControllerBase
                     question = normalizedQuestion,
                     searchQuestion,
                     intent = "GeneralQuestion",
-                    requiresDocumentSearch = false,
+
+                    requiresDocumentSearch =
+                        false,
+
                     detectedLanguage =
                         analysis.DetectedLanguage,
+
                     writingStyle =
                         analysis.WritingStyle,
+
                     responseInstruction =
                         analysis.ResponseInstruction,
-                    isFollowUp = analysis.IsFollowUp,
+
+                    isFollowUp =
+                        analysis.IsFollowUp,
+
                     clarificationRequest =
                         analysis.IsClarification,
+
                     translationRequest =
                         analysis.IsTranslationRequest,
-                    requiresExternalKnowledge = true,
-                    externalPermissionResponse = false,
-                    externalPermissionGranted = false,
-                    answerSource = "document-not-found",
-                    answer = permissionPrompt,
-                    sources = Array.Empty<object>()
+
+                    requiresExternalKnowledge =
+                        true,
+
+                    externalPermissionResponse =
+                        false,
+
+                    externalPermissionGranted =
+                        false,
+
+                    answerSource =
+                        "document-not-found",
+
+                    answer =
+                        permissionPrompt,
+
+                    sources =
+                        Array.Empty<object>()
                 });
             }
 
@@ -469,10 +543,11 @@ public sealed class QuestionsController : ControllerBase
                 cancellationToken);
 
             /*
-             * ஒரே page-ல் பல chunks இருந்தாலும்
-             * frontend source list-ல் அந்த page
-             * ஒருமுறை மட்டும் வரும்.
+             * If multiple chunks come from the same
+             * page, return that page only once in the
+             * frontend source list.
              */
+
             var sources = relevantChunks
                 .GroupBy(item =>
                     item.Chunk.PageNumber)
@@ -553,7 +628,8 @@ public sealed class QuestionsController : ControllerBase
                 externalPermissionGranted =
                     analysis.ExternalPermissionGranted,
 
-                answerSource = "document",
+                answerSource =
+                    "document",
 
                 answer =
                     answer.Trim(),
@@ -638,6 +714,162 @@ public sealed class QuestionsController : ControllerBase
         }
     }
 
+    /*
+     * Get question embedding from Redis when available.
+     *
+     * Cache MISS:
+     *     Ollama generates the embedding and it is
+     *     stored in Redis.
+     *
+     * Cache HIT:
+     *     Ollama call is skipped.
+     */
+
+    private async Task<float[]>
+        GetOrCreateQuestionEmbeddingAsync(
+            string searchQuestion,
+            CancellationToken cancellationToken)
+    {
+        var normalizedSearchQuestion =
+            searchQuestion.Trim();
+
+        var cacheKey =
+            BuildEmbeddingCacheKey(
+                normalizedSearchQuestion);
+
+        try
+        {
+            var cachedJson =
+                await _cache.GetStringAsync(
+                    cacheKey,
+                    cancellationToken);
+
+            if (!string.IsNullOrWhiteSpace(
+                    cachedJson))
+            {
+                var cachedEmbedding =
+                    JsonSerializer.Deserialize<float[]>(
+                        cachedJson);
+
+                if (cachedEmbedding is
+                    { Length: > 0 })
+                {
+                    _logger.LogInformation(
+                        "Redis embedding cache HIT. Key: {CacheKey}",
+                        cacheKey);
+
+                    return cachedEmbedding;
+                }
+            }
+        }
+        catch (Exception exception)
+            when (exception is not
+                  OperationCanceledException)
+        {
+            /*
+             * Redis should improve performance,
+             * not make document Q&A unavailable.
+             *
+             * If Redis GET fails, continue using
+             * Ollama normally.
+             */
+
+            _logger.LogWarning(
+                exception,
+                "Redis embedding cache GET failed. " +
+                "Falling back to Ollama.");
+        }
+
+        _logger.LogInformation(
+            "Redis embedding cache MISS. Key: {CacheKey}",
+            cacheKey);
+
+        var embedding =
+            await _embeddingService
+                .GenerateEmbeddingAsync(
+                    $"search_query: " +
+                    normalizedSearchQuestion,
+                    cancellationToken);
+
+        /*
+         * Cache only valid embeddings.
+         */
+
+        if (embedding.Length > 0)
+        {
+            try
+            {
+                var serializedEmbedding =
+                    JsonSerializer.Serialize(
+                        embedding);
+
+                await _cache.SetStringAsync(
+                    cacheKey,
+                    serializedEmbedding,
+                    new DistributedCacheEntryOptions
+                    {
+                        AbsoluteExpirationRelativeToNow =
+                            TimeSpan.FromHours(24)
+                    },
+                    cancellationToken);
+
+                _logger.LogInformation(
+                    "Question embedding stored in Redis. " +
+                    "Key: {CacheKey}",
+                    cacheKey);
+            }
+            catch (Exception exception)
+                when (exception is not
+                      OperationCanceledException)
+            {
+                /*
+                 * Redis SET failure must not fail
+                 * the user's question.
+                 */
+
+                _logger.LogWarning(
+                    exception,
+                    "Redis embedding cache SET failed. " +
+                    "Continuing without cache.");
+            }
+        }
+
+        return embedding;
+    }
+
+    /*
+     * Create a deterministic Redis key without putting
+     * the user's full question text into the key.
+     *
+     * SHA-256 avoids long / sensitive Redis keys.
+     *
+     * v1 lets us invalidate old embeddings later if
+     * the embedding model or input format changes.
+     */
+
+    private static string BuildEmbeddingCacheKey(
+        string searchQuestion)
+    {
+        var normalized =
+            searchQuestion
+                .Trim()
+                .ToLowerInvariant();
+
+        var bytes =
+            Encoding.UTF8.GetBytes(
+                normalized);
+
+        var hash =
+            SHA256.HashData(bytes);
+
+        var hashText =
+            Convert.ToHexString(hash)
+                .ToLowerInvariant();
+
+        return
+            $"embedding:v1:{hashText}";
+    }
+
     private async Task SaveConversationMessagesAsync(
         Guid conversationId,
         Guid userId,
@@ -711,9 +943,9 @@ public sealed class QuestionsController : ControllerBase
                 ClaimTypes.NameIdentifier);
 
         return Guid.TryParse(
-            userIdValue,
-            out userId) &&
-            userId != Guid.Empty;
+                   userIdValue,
+                   out userId) &&
+               userId != Guid.Empty;
     }
 
     private static string BuildExternalPermissionPrompt(

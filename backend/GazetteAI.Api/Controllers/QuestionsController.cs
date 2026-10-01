@@ -290,13 +290,13 @@ public sealed class QuestionsController : ControllerBase
                         analysis.ResponseInstruction,
 
                     isFollowUp =
-                        false,
+                        analysis.IsFollowUp,
 
                     clarificationRequest =
-                        false,
+                        analysis.IsClarification,
 
                     translationRequest =
-                        false,
+                        analysis.IsTranslationRequest,
 
                     requiresExternalKnowledge =
                         analysis.RequiresExternalKnowledge,
@@ -308,9 +308,12 @@ public sealed class QuestionsController : ControllerBase
                         analysis.ExternalPermissionGranted,
 
                     answerSource =
-                        analysis.ExternalPermissionGranted
-                            ? "general-knowledge"
-                            : "assistant",
+                        analysis.IsTranslationRequest ||
+                        analysis.IsClarification
+                            ? "conversation"
+                            : analysis.ExternalPermissionGranted
+                                ? "general-knowledge"
+                                : "assistant",
 
                     answer =
                         directAnswer,
@@ -721,34 +724,38 @@ public sealed class QuestionsController : ControllerBase
             .ToLowerInvariant() switch
         {
             "tamil" =>
-                "இந்தத் தகவல் பதிவேற்றிய ஆவணத்தில் இல்லை. " +
-                "பொதுவான AI அறிவைப் பயன்படுத்தி பதில் சொல்லவா?",
+                "இந்தக் கேள்விக்கான பதில் பதிவேற்றிய ஆவணத்தில் இல்லை. " +
+                "நீங்கள் விரும்பினால், இணையத்தில் தேடி சமீபத்திய " +
+                "தகவல்களுடன் பதில் சொல்லவா?",
 
             "tanglish" =>
-                "Indha information uploaded document-la illa. " +
-                "General AI knowledge use panni answer sollava?",
+                "Indha question-oda answer uploaded document-la illa. " +
+                "Neenga virumbina, web-la search panni latest " +
+                "information-oda answer sollava?",
 
             "sinhala" =>
-                "මෙම තොරතුරු උඩුගත කළ ලේඛනයේ නැහැ. " +
-                "සාමාන්‍ය AI දැනුම භාවිතයෙන් පිළිතුරු දෙන්නද?",
+                "මෙම ප්‍රශ්නයට පිළිතුර උඩුගත කළ ලේඛනයේ නැහැ. " +
+                "ඔබ කැමති නම්, වෙබ් අඩවියේ සොයා නවතම " +
+                "තොරතුරු සමඟ පිළිතුරු දෙන්නද?",
 
             "singlish" =>
-                "Me information uploaded document eke naha. " +
-                "General AI knowledge use karala answer karannada?",
+                "Me question eke answer uploaded document eke naha. " +
+                "Oya kamathi nam web eke search karala latest " +
+                "information ekka answer karannada?",
 
             "french" =>
-                "Cette information ne figure pas dans le document. " +
-                "Voulez-vous une réponse basée sur les " +
-                "connaissances générales de l’IA ?",
+                "La réponse à cette question ne figure pas dans le " +
+                "document. Voulez-vous que je recherche sur le Web " +
+                "et réponde avec des informations récentes ?",
 
             "hindi" =>
-                "यह जानकारी अपलोड किए गए दस्तावेज़ में नहीं है। " +
-                "क्या मैं सामान्य AI ज्ञान का उपयोग करके उत्तर दूँ?",
+                "इस प्रश्न का उत्तर अपलोड किए गए दस्तावेज़ में नहीं है। " +
+                "क्या मैं वेब पर खोजकर नवीनतम जानकारी के साथ उत्तर दूँ?",
 
             _ =>
-                "This information is not available in the " +
-                "uploaded document. Would you like an answer " +
-                "using general AI knowledge?"
+                "The answer to this question is not available in the " +
+                "uploaded document. Would you like me to search the web " +
+                "and answer using current information?"
         };
     }
 

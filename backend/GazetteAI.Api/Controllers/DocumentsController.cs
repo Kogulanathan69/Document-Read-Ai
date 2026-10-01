@@ -37,6 +37,190 @@ public sealed class DocumentsController : ControllerBase
         _dbContext = dbContext;
     }
 
+    [HttpGet]
+    public async Task<IActionResult> GetDocuments(
+        CancellationToken cancellationToken)
+    {
+        if (!TryGetCurrentUserId(out var userId))
+        {
+            return InvalidToken();
+        }
+
+        var documents = await _dbContext.Documents
+            .AsNoTracking()
+            .Where(document => document.UserId == userId)
+            .OrderByDescending(document => document.UploadedAt)
+            .Select(document => new
+            {
+                documentId = document.Id,
+                document.FileName,
+                document.ContentType,
+                document.FileSize,
+                totalPages = document.TotalPages ?? 0,
+                totalChunks = document.Chunks.Count,
+                document.Status,
+                document.UploadedAt,
+                conversationCount = document.ChatMessages
+                    .Select(message => message.ConversationId)
+                    .Distinct()
+                    .Count()
+            })
+            .ToListAsync(cancellationToken);
+
+        return Ok(documents);
+    }
+
+    [HttpGet("{documentId:guid}/conversations")]
+    public async Task<IActionResult> GetConversations(
+        Guid documentId,
+        CancellationToken cancellationToken)
+    {
+        if (!TryGetCurrentUserId(out var userId))
+        {
+            return InvalidToken();
+        }
+
+        var ownsDocument = await _dbContext.Documents
+            .AsNoTracking()
+            .AnyAsync(
+                document =>
+                    document.Id == documentId &&
+                    document.UserId == userId,
+                cancellationToken);
+
+        if (!ownsDocument)
+        {
+            return DocumentNotFound();
+        }
+
+        var messages = await _dbContext.ChatMessages
+            .AsNoTracking()
+            .Where(message =>
+                message.DocumentId == documentId &&
+                message.UserId == userId)
+            .OrderBy(message => message.CreatedAt)
+            .Select(message => new
+            {
+                message.ConversationId,
+                message.Role,
+                message.Content,
+                message.CreatedAt
+            })
+            .ToListAsync(cancellationToken);
+
+        var conversations = messages
+            .GroupBy(message => message.ConversationId)
+            .Select(group => new
+            {
+                conversationId = group.Key,
+                title = group
+                    .FirstOrDefault(message =>
+                        message.Role.Equals(
+                            "User",
+                            StringComparison.OrdinalIgnoreCase))
+                    ?.Content ?? "Document conversation",
+                messageCount = group.Count(),
+                updatedAt = group.Max(message => message.CreatedAt)
+            })
+            .OrderByDescending(item => item.updatedAt)
+            .ToList();
+
+        return Ok(conversations);
+    }
+
+    [HttpGet(
+        "{documentId:guid}/conversations/" +
+        "{conversationId:guid}/messages")]
+    public async Task<IActionResult> GetConversationMessages(
+        Guid documentId,
+        Guid conversationId,
+        CancellationToken cancellationToken)
+    {
+        if (!TryGetCurrentUserId(out var userId))
+        {
+            return InvalidToken();
+        }
+
+        var ownsDocument = await _dbContext.Documents
+            .AsNoTracking()
+            .AnyAsync(
+                document =>
+                    document.Id == documentId &&
+                    document.UserId == userId,
+                cancellationToken);
+
+        if (!ownsDocument)
+        {
+            return DocumentNotFound();
+        }
+
+        var messages = await _dbContext.ChatMessages
+            .AsNoTracking()
+            .Where(message =>
+                message.DocumentId == documentId &&
+                message.ConversationId == conversationId &&
+                message.UserId == userId)
+            .OrderBy(message => message.CreatedAt)
+            .Select(message => new
+            {
+                messageId = message.Id,
+                message.Role,
+                message.Content,
+                message.CreatedAt
+            })
+            .ToListAsync(cancellationToken);
+
+        return Ok(new
+        {
+            documentId,
+            conversationId,
+            messages
+        });
+    }
+
+    [HttpDelete("{documentId:guid}")]
+    public async Task<IActionResult> DeleteDocument(
+        Guid documentId,
+        CancellationToken cancellationToken)
+    {
+        if (!TryGetCurrentUserId(out var userId))
+        {
+            return InvalidToken();
+        }
+
+        var document = await _dbContext.Documents
+            .FirstOrDefaultAsync(
+                item =>
+                    item.Id == documentId &&
+                    item.UserId == userId,
+                cancellationToken);
+
+        if (document is null)
+        {
+            return DocumentNotFound();
+        }
+
+        await using var transaction =
+            await _dbContext.Database.BeginTransactionAsync(
+                cancellationToken);
+
+        await _dbContext.ChatMessages
+            .Where(message =>
+                message.DocumentId == documentId &&
+                message.UserId == userId)
+            .ExecuteDeleteAsync(cancellationToken);
+
+        _dbContext.Documents.Remove(document);
+        await _dbContext.SaveChangesAsync(cancellationToken);
+        await transaction.CommitAsync(cancellationToken);
+
+        return Ok(new
+        {
+            message = "Document deleted successfully.",
+            documentId
+        });
+    }
+
     [HttpPost("extract")]
     [Consumes("multipart/form-data")]
     [RequestSizeLimit(20_000_000)]
@@ -233,7 +417,8 @@ public sealed class DocumentsController : ControllerBase
             totalPages = document.TotalPages,
             totalChunks = document.Chunks.Count,
             embeddingDimensions = 768,
-            status = document.Status
+            status = document.Status,
+            uploadedAt = document.UploadedAt
         });
     }
 
@@ -348,6 +533,25 @@ public sealed class DocumentsController : ControllerBase
             userIdValue,
             out userId) &&
             userId != Guid.Empty;
+    }
+
+    private IActionResult InvalidToken()
+    {
+        return Unauthorized(new
+        {
+            message =
+                "The authentication token does not " +
+                "contain a valid user ID."
+        });
+    }
+
+    private IActionResult DocumentNotFound()
+    {
+        return NotFound(new
+        {
+            message =
+                "Document was not found for this user."
+        });
     }
 }
 

@@ -1,7 +1,11 @@
 <main class="page-container">
+
   <section class="document-card">
+
     <nav class="account-bar">
+
       <div class="account-profile">
+
         <span class="account-avatar">
           {{ currentUser()?.fullName?.charAt(0)?.toUpperCase() || 'U' }}
         </span>
@@ -10,213 +14,702 @@
           <strong>{{ currentUser()?.fullName }}</strong>
           <small>{{ currentUser()?.email }}</small>
         </div>
+
       </div>
 
-      <button type="button" class="logout-button" (click)="logout()">
+      <button
+        type="button"
+        class="logout-button"
+        (click)="logout()"
+      >
         Sign out
       </button>
+
     </nav>
 
+
     <header class="header">
+
       <span class="logo">📄</span>
 
       <div>
         <h1>GazetteAI</h1>
-        <p>Upload a PDF and chat with your document</p>
+        <p>Your secure document intelligence workspace</p>
       </div>
+
     </header>
 
-    <section class="upload-section">
-      <label class="file-box">
-        <span class="file-icon">📁</span>
-        <span>Select PDF document</span>
 
-        <input
-          type="file"
-          accept=".pdf,application/pdf"
-          (change)="onFileSelected($event)"
-        />
-      </label>
+    @if (errorMessage) {
+      <p class="page-error">
+        {{ errorMessage }}
+      </p>
+    }
 
-      @if (selectedFile) {
-        <div class="selected-file">
-          <span>📄 {{ selectedFile.name }}</span>
 
-          <small>
-            {{ selectedFile.size / 1024 | number:'1.0-1' }}
-            KB
-          </small>
-        </div>
-      }
+    <div class="dashboard-layout">
 
-      <button
-        type="button"
-        class="primary-button"
-        [disabled]="!selectedFile || isUploading"
-        (click)="uploadDocument()"
-      >
-        @if (isUploading) {
-          Uploading and processing...
-        } @else {
-          Upload PDF
-        }
-      </button>
+      <!-- ====================================== -->
+      <!-- DOCUMENT LIBRARY -->
+      <!-- ====================================== -->
 
-      @if (errorMessage) {
-        <p class="error-message">
-          {{ errorMessage }}
-        </p>
-      }
-    </section>
+      <aside class="library-panel">
 
-    @if (uploadedDocument) {
-      <section class="document-result">
-        <div class="success-title">
-          <span>✅</span>
-          <h2>Document ready</h2>
-        </div>
-
-        <div class="document-details">
-          <div>
-            <span>File</span>
-            <strong>
-              {{ uploadedDocument.fileName }}
-            </strong>
-          </div>
+        <div class="panel-heading">
 
           <div>
-            <span>Pages</span>
-            <strong>
-              {{ uploadedDocument.totalPages }}
-            </strong>
-          </div>
-
-          <div>
-            <span>Chunks</span>
-            <strong>
-              {{ uploadedDocument.totalChunks }}
-            </strong>
-          </div>
-
-          <div>
-            <span>Status</span>
-            <strong>
-              {{ uploadedDocument.status }}
-            </strong>
-          </div>
-        </div>
-      </section>
-
-      <section class="chat-section">
-        <div class="chat-header">
-          <div class="assistant-avatar">
-            AI
-          </div>
-
-          <div>
-            <h2>Document Assistant</h2>
-            <span>Online</span>
+            <span class="eyebrow">LIBRARY</span>
+            <h2>My Documents</h2>
           </div>
 
           <button
             type="button"
-            class="new-chat-button"
-            title="Start new conversation"
-            (click)="startNewConversation()"
+            class="refresh-button"
+            title="Refresh documents"
+            [disabled]="isLoadingDocuments"
+            (click)="loadDocuments()"
           >
-            New chat
+            ↻
           </button>
+
         </div>
 
-        <div class="messages-container">
-          @for (message of messages; track message.id) {
-            <div
-              class="message-row"
-              [class.user-row]="message.role === 'user'"
-              [class.assistant-row]="message.role === 'assistant'"
-            >
-              @if (message.role === 'assistant') {
-                <div class="message-avatar">
-                  AI
-                </div>
-              }
 
-              <div
-                class="message-bubble"
-                [class.user-message]="message.role === 'user'"
-                [class.assistant-message]="message.role === 'assistant'"
+        @if (isLoadingDocuments) {
+
+          <p class="empty-state">
+            Loading documents...
+          </p>
+
+        } @else if (documents.length === 0) {
+
+          <div class="empty-state">
+
+            <span>📂</span>
+
+            <strong>
+              No documents yet
+            </strong>
+
+            <small>
+              Upload your first PDF to begin.
+            </small>
+
+          </div>
+
+        } @else {
+
+          <div class="document-list">
+
+            @for (
+              document of documents;
+              track document.documentId
+            ) {
+
+              <article
+                class="document-list-item"
+                [class.active]="
+                  uploadedDocument?.documentId ===
+                  document.documentId
+                "
               >
-                <p>{{ message.content }}</p>
 
-                @if (
-                  message.sources &&
-                  message.sources.length > 0
-                ) {
-                  <div class="message-sources">
-                    @for (
-                      source of message.sources;
-                      track source.chunkIndex
-                    ) {
-                      <span>
-                        📖 Page {{ source.pageNumber }}
-                        ·
-                        Score
-                        {{
-                          source.similarityScore
-                            | number:'1.2-2'
-                        }}
-                      </span>
-                    }
-                  </div>
-                }
-              </div>
+                <button
+                  type="button"
+                  class="document-open-button"
+                  (click)="openDocument(document)"
+                >
+
+                  <span class="document-icon">
+                    PDF
+                  </span>
+
+                  <span class="document-copy">
+
+                    <strong>
+                      {{ document.fileName }}
+                    </strong>
+
+                    <small>
+                      {{ document.totalPages }} pages ·
+                      {{ formatFileSize(document.fileSize) }}
+                    </small>
+
+                    <small>
+                      {{ document.conversationCount }} chats ·
+                      {{ document.uploadedAt | date:'mediumDate' }}
+                    </small>
+
+                  </span>
+
+                </button>
+
+
+                <button
+                  type="button"
+                  class="delete-button"
+                  title="Delete document"
+                  [disabled]="
+                    deletingDocumentId === document.documentId
+                  "
+                  (click)="deleteDocument(document)"
+                >
+                  {{
+                    deletingDocumentId === document.documentId
+                      ? '…'
+                      : '×'
+                  }}
+                </button>
+
+              </article>
+
+            }
+
+          </div>
+
+        }
+
+      </aside>
+
+
+      <!-- ====================================== -->
+      <!-- MAIN WORKSPACE -->
+      <!-- ====================================== -->
+
+      <div class="workspace-panel">
+
+
+        <!-- ====================================== -->
+        <!-- UPLOAD -->
+        <!-- ====================================== -->
+
+        <section class="upload-section">
+
+          <div class="section-heading">
+
+            <div>
+              <span class="eyebrow">
+                NEW DOCUMENT
+              </span>
+
+              <h2>
+                Upload PDF
+              </h2>
             </div>
+
+            <span class="limit-badge">
+              Max 20 MB
+            </span>
+
+          </div>
+
+
+          <label class="file-box">
+
+            <span class="file-icon">
+              ＋
+            </span>
+
+            <span>
+              Select PDF document
+            </span>
+
+            <small>
+              Selectable text or scanned Tamil,
+              Sinhala and English
+            </small>
+
+            <input
+              type="file"
+              accept=".pdf,application/pdf"
+              (change)="onFileSelected($event)"
+            />
+
+          </label>
+
+
+          @if (selectedFile) {
+
+            <div class="selected-file">
+
+              <span>
+                📄 {{ selectedFile.name }}
+              </span>
+
+              <small>
+                {{ formatFileSize(selectedFile.size) }}
+              </small>
+
+            </div>
+
           }
 
-          @if (isAsking) {
-            <div class="message-row assistant-row">
-              <div class="message-avatar">
+
+          <button
+            type="button"
+            class="primary-button"
+            [disabled]="!selectedFile || isUploading"
+            (click)="uploadDocument()"
+          >
+            {{
+              isUploading
+                ? 'Uploading and processing...'
+                : 'Upload PDF'
+            }}
+          </button>
+
+        </section>
+
+
+        @if (uploadedDocument) {
+
+
+          <!-- ====================================== -->
+          <!-- ACTIVE DOCUMENT -->
+          <!-- ====================================== -->
+
+          <section class="document-result">
+
+            <div class="success-title">
+
+              <span>
+                ✓
+              </span>
+
+              <div>
+
+                <small>
+                  ACTIVE DOCUMENT
+                </small>
+
+                <h2>
+                  {{ uploadedDocument.fileName }}
+                </h2>
+
+              </div>
+
+            </div>
+
+
+            <div class="document-details">
+
+              <div>
+                <span>Pages</span>
+                <strong>
+                  {{ uploadedDocument.totalPages }}
+                </strong>
+              </div>
+
+              <div>
+                <span>Chunks</span>
+                <strong>
+                  {{ uploadedDocument.totalChunks }}
+                </strong>
+              </div>
+
+              <div>
+                <span>Status</span>
+                <strong>
+                  {{ uploadedDocument.status }}
+                </strong>
+              </div>
+
+              <div>
+                <span>Uploaded</span>
+                <strong>
+                  {{
+                    uploadedDocument.uploadedAt
+                      | date:'shortDate'
+                  }}
+                </strong>
+              </div>
+
+            </div>
+
+          </section>
+
+
+          <!-- ====================================== -->
+          <!-- CONVERSATION HISTORY -->
+          <!-- ====================================== -->
+
+          <section class="conversation-panel">
+
+            <div class="section-heading compact">
+
+              <div>
+
+                <span class="eyebrow">
+                  HISTORY
+                </span>
+
+                <h2>
+                  Previous Conversations
+                </h2>
+
+              </div>
+
+
+              <button
+                type="button"
+                class="secondary-button"
+                (click)="startNewConversation()"
+              >
+                + New chat
+              </button>
+
+            </div>
+
+
+            @if (isLoadingConversations) {
+
+              <p class="conversation-empty">
+                Loading conversations...
+              </p>
+
+            } @else if (conversations.length === 0) {
+
+              <p class="conversation-empty">
+                No previous conversations for this document.
+              </p>
+
+            } @else {
+
+              <div class="conversation-list">
+
+                @for (
+                  conversation of conversations;
+                  track conversation.conversationId
+                ) {
+
+                  <button
+                    type="button"
+                    class="conversation-item"
+                    [disabled]="isLoadingHistory"
+                    (click)="openConversation(conversation)"
+                  >
+
+                    <span>
+                      💬
+                    </span>
+
+                    <span>
+
+                      <strong>
+                        {{ conversation.title }}
+                      </strong>
+
+                      <small>
+                        {{ conversation.messageCount }} messages ·
+                        {{
+                          conversation.updatedAt
+                            | date:'short'
+                        }}
+                      </small>
+
+                    </span>
+
+                  </button>
+
+                }
+
+              </div>
+
+            }
+
+          </section>
+
+
+          <!-- ====================================== -->
+          <!-- CHAT -->
+          <!-- ====================================== -->
+
+          <section class="chat-section">
+
+
+            <!-- CHAT HEADER -->
+
+            <div class="chat-header">
+
+              <div class="assistant-avatar">
                 AI
               </div>
 
-              <div
-                class="message-bubble assistant-message typing"
-              >
-                <span></span>
-                <span></span>
-                <span></span>
-              </div>
-            </div>
-          }
-        </div>
+              <div class="chat-title">
 
-        @if (questionError) {
-          <p class="error-message">
-            {{ questionError }}
-          </p>
+                <h2>
+                  Document Assistant
+                </h2>
+
+                <span>
+                  {{
+                    isLoadingHistory
+                      ? 'Opening history...'
+                      : 'Online'
+                  }}
+                </span>
+
+              </div>
+
+
+              <button
+                type="button"
+                class="new-chat-button"
+                (click)="startNewConversation()"
+              >
+                New chat
+              </button>
+
+            </div>
+
+
+            <!-- ====================================== -->
+            <!-- MESSAGES -->
+            <!-- ====================================== -->
+
+            <div class="messages-container">
+
+              @for (
+                message of messages;
+                track message.id
+              ) {
+
+                <div
+                  class="message-row"
+                  [class.user-row]="
+                    message.role === 'user'
+                  "
+                  [class.assistant-row]="
+                    message.role === 'assistant'
+                  "
+                >
+
+                  @if (message.role === 'assistant') {
+
+                    <div class="message-avatar">
+                      AI
+                    </div>
+
+                  }
+
+
+                  <div
+                    class="message-bubble"
+                    [class.user-message]="
+                      message.role === 'user'
+                    "
+                    [class.assistant-message]="
+                      message.role === 'assistant'
+                    "
+                  >
+
+                    <!-- MESSAGE CONTENT -->
+
+                    <p>
+                      {{ message.content }}
+                    </p>
+
+
+                    <!-- ================================== -->
+                    <!-- PDF DOCUMENT SOURCES -->
+                    <!-- ================================== -->
+
+                    @if (message.sources?.length) {
+
+                      <div class="message-sources">
+
+                        @for (
+                          source of message.sources;
+                          track source.chunkIndex
+                        ) {
+
+                          <span>
+
+                            📖 Page
+                            {{ source.pageNumber }}
+
+                            · Score
+
+                            {{
+                              source.similarityScore
+                                | number:'1.2-2'
+                            }}
+
+                          </span>
+
+                        }
+
+                      </div>
+
+                    }
+
+
+                    <!-- ================================== -->
+                    <!-- LIVE WEB SOURCES -->
+                    <!-- ================================== -->
+
+                    @if (message.webSources?.length) {
+
+                      <div class="web-sources">
+
+                        <div class="web-sources-title">
+                          🌐 Web Sources
+                        </div>
+
+                        <div class="web-source-list">
+
+                          @for (
+                            source of message.webSources;
+                            track source.url
+                          ) {
+
+                            <a
+                              class="web-source-link"
+                              [href]="source.url"
+                              target="_blank"
+                              rel="noopener noreferrer"
+                            >
+
+                              <span class="web-source-icon">
+                                ↗
+                              </span>
+
+                              <span class="web-source-title">
+                                {{
+                                  source.title ||
+                                  source.url
+                                }}
+                              </span>
+
+                            </a>
+
+                          }
+
+                        </div>
+
+                      </div>
+
+                    }
+
+                  </div>
+
+                </div>
+
+              }
+
+
+              <!-- ====================================== -->
+              <!-- AI TYPING -->
+              <!-- ====================================== -->
+
+              @if (isAsking) {
+
+                <div class="message-row assistant-row">
+
+                  <div class="message-avatar">
+                    AI
+                  </div>
+
+                  <div
+                    class="
+                      message-bubble
+                      assistant-message
+                      typing
+                    "
+                  >
+                    <span></span>
+                    <span></span>
+                    <span></span>
+                  </div>
+
+                </div>
+
+              }
+
+            </div>
+
+
+            <!-- ====================================== -->
+            <!-- QUESTION ERROR -->
+            <!-- ====================================== -->
+
+            @if (questionError) {
+
+              <p class="error-message">
+                {{ questionError }}
+              </p>
+
+            }
+
+
+            <!-- ====================================== -->
+            <!-- MESSAGE INPUT -->
+            <!-- ====================================== -->
+
+            <div class="message-input-area">
+
+              <input
+                type="text"
+                placeholder="Ask about the document or current information..."
+                [value]="question"
+                [disabled]="
+                  isAsking ||
+                  isLoadingHistory
+                "
+                (input)="onQuestionInput($event)"
+                (keydown.enter)="askQuestion()"
+              />
+
+
+              <button
+                type="button"
+                class="send-button"
+                title="Send question"
+                [disabled]="
+                  isAsking ||
+                  isLoadingHistory ||
+                  !question.trim()
+                "
+                (click)="askQuestion()"
+              >
+                ➤
+              </button>
+
+            </div>
+
+          </section>
+
+
+        } @else {
+
+
+          <!-- ====================================== -->
+          <!-- WELCOME -->
+          <!-- ====================================== -->
+
+          <section class="welcome-panel">
+
+            <span>
+              ✨
+            </span>
+
+            <h2>
+              Select a document to start chatting
+            </h2>
+
+            <p>
+              Open a document from your library
+              or upload a new PDF.
+            </p>
+
+          </section>
+
         }
 
-        <div class="message-input-area">
-          <input
-            type="text"
-            placeholder="Ask something about this document..."
-            [value]="question"
-            [disabled]="isAsking"
-            (input)="onQuestionInput($event)"
-            (keydown.enter)="askQuestion()"
-          />
+      </div>
 
-          <button
-            type="button"
-            class="send-button"
-            title="Send question"
-            [disabled]="isAsking || !question.trim()"
-            (click)="askQuestion()"
-          >
-            ➤
-          </button>
-        </div>
-      </section>
-    }
+    </div>
+
   </section>
+
 </main>

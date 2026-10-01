@@ -148,6 +148,62 @@ public sealed class GroqChatCompletionService
         }
 
         /*
+         * A language or clarification command refers to the latest
+         * completed assistant answer. Rewriting that verified answer is
+         * both more accurate and cheaper than running vector retrieval
+         * again. Re-searching short commands such as "tamil la sollu"
+         * can select an unrelated low-similarity chunk (for example a
+         * person's name) and replace the correct earlier answer.
+         */
+        var isLanguageCommand =
+            IsLanguageCommand(loweredQuestion);
+
+        var isClarificationCommand =
+            IsClarificationCommand(loweredQuestion);
+
+        if ((isLanguageCommand || isClarificationCommand) &&
+            TryGetTransformableAssistantAnswer(
+                history,
+                out var existingDocumentAnswer))
+        {
+            var responseLanguage =
+                DetectResponseLanguage(
+                    normalizedQuestion,
+                    FindPreviousResponseLanguage(history));
+
+            var responseStyle =
+                isClarificationCommand
+                    ? "simple"
+                    : "standard";
+
+            var rewrittenAnswer =
+                await RewriteExistingAnswerAsync(
+                    existingDocumentAnswer,
+                    responseLanguage,
+                    responseStyle,
+                    isClarificationCommand,
+                    cancellationToken);
+
+            return new ConversationAnalysis
+            {
+                Intent = isLanguageCommand
+                    ? "Translation"
+                    : "Clarification",
+                RequiresDocumentSearch = false,
+                DirectResponse = rewrittenAnswer,
+                SearchQuestion = string.Empty,
+                ResponseLanguage = responseLanguage,
+                ResponseStyle = responseStyle,
+                IsFollowUp = true,
+                IsTranslationRequest = isLanguageCommand,
+                IsClarificationRequest =
+                    isClarificationCommand,
+                ResponseInstruction =
+                    "Rewrite the latest verified answer only."
+            };
+        }
+
+        /*
          * A language-only message immediately after a live-web
          * answer means "translate that answer". It must not be
          * searched as a new phrase such as "tamil la sollu".
@@ -463,6 +519,14 @@ public sealed class GroqChatCompletionService
                         Never use outside knowledge.
                         Never invent information.
 
+                        Read all supplied context carefully and reason
+                        across relevant sentences. The answer does not
+                        need to appear as one exact copied sentence:
+                        summarize, compare or combine facts when the
+                        conclusion is directly supported by the context.
+                        Distinguish an answer that can be derived from the
+                        document from one that requires outside facts.
+
                         If the answer is not present, return exactly:
                         __NOT_FOUND__
 
@@ -670,6 +734,16 @@ public sealed class GroqChatCompletionService
                         not support an answer, say that reliable
                         current information was not found.
 
+                        The supplied results are live web-search
+                        results. Never say that you cannot browse,
+                        access live information, verify current
+                        information, or that your knowledge has a
+                        cutoff. Do not add a generic uncertainty
+                        disclaimer when the sources support the
+                        answer. Express uncertainty only when the
+                        supplied sources themselves conflict or are
+                        insufficient.
+
                         Keep names, dates and official titles exact.
                         Do not claim the answer came from the PDF.
                         Do not print raw URLs because the app shows
@@ -694,7 +768,129 @@ public sealed class GroqChatCompletionService
             maxCompletionTokens: 700,
             cancellationToken);
 
-        return CleanAnswer(answer);
+        answer = CleanAnswer(answer);
+
+        /*
+         * Some models occasionally append a generic training-data or
+         * no-live-access disclaimer even though this method supplies
+         * current Tavily results. Retry once only when that contradictory
+         * disclaimer is detected.
+         */
+        if (ContainsFalseLiveWebDisclaimer(answer))
+        {
+            answer = await SendChatAsync(
+                [
+                    new GroqMessage
+                    {
+                        Role = "system",
+                        Content = $"""
+                            Rewrite the supplied answer without any claim
+                            that live/current information cannot be accessed
+                            or verified. The original answer was generated
+                            from live web-search sources. Preserve all
+                            supported facts, names and dates. Do not add new
+                            facts or URLs. Return only the corrected answer.
+
+                            {languageInstruction}
+                            """
+                    },
+                    new GroqMessage
+                    {
+                        Role = "user",
+                        Content = answer
+                    }
+                ],
+                temperature: 0,
+                maxCompletionTokens: 700,
+                cancellationToken);
+
+            answer = CleanAnswer(answer);
+        }
+
+        /*
+         * A correct web answer can still sound like a word-for-word
+         * machine translation in Tanglish. Rewrite only the wording when
+         * known unnatural patterns are detected; keep the sourced facts.
+         */
+        if (analysis.ResponseLanguage.Equals(
+                "Tanglish",
+                StringComparison.OrdinalIgnoreCase) &&
+            ContainsUnnaturalTanglish(answer))
+        {
+            answer = await SendChatAsync(
+                [
+                    new GroqMessage
+                    {
+                        Role = "system",
+                        Content = """
+                            Rewrite the supplied answer in natural Sri Lankan
+                            Tamil Tanglish: spoken Tamil written with Latin
+                            letters. Preserve every fact, name, number, party,
+                            title and date exactly. Do not add new facts.
+
+                            Use natural Tamil grammar and sentence order.
+                            Use "avar" for a person and "adhu/idhu" for a
+                            thing. For assuming office, say "padhavi yetrar"
+                            or "padhavikku vandhar". Never use "inga" as a
+                            pronoun. Never say "office-ku vechirukku".
+                            Avoid word-for-word English grammar.
+
+                            Example style:
+                            "Sri Lanka-oda current President [Name]. Avar
+                            [Date]-la padhavi yetrar."
+
+                            Return only the polished Tanglish answer.
+                            """
+                    },
+                    new GroqMessage
+                    {
+                        Role = "user",
+                        Content = answer
+                    }
+                ],
+                temperature: 0,
+                maxCompletionTokens: 700,
+                cancellationToken);
+
+            answer = CleanAnswer(answer);
+        }
+
+        return answer;
+    }
+
+    private static bool ContainsFalseLiveWebDisclaimer(
+        string answer)
+    {
+        var normalized = answer.ToLowerInvariant();
+
+        return ContainsAny(
+            normalized,
+            "cannot verify live",
+            "cannot verify real-time",
+            "cannot verify realtime",
+            "cannot access live",
+            "cannot access real-time",
+            "can't verify live",
+            "unable to verify live",
+            "knowledge cutoff",
+            "knowledge cut-off",
+            "என்னால் நேரடியாக இணையத்தை",
+            "நிகழ்நேர தகவலை சரிபார்க்க முடியாது");
+    }
+
+    private static bool ContainsUnnaturalTanglish(
+        string answer)
+    {
+        var normalized = answer.ToLowerInvariant();
+
+        return ContainsAny(
+            normalized,
+            "inga ",
+            "office-ku vechirukku",
+            "office ku vechirukku",
+            "office-la vechirukku",
+            "president eka",
+            "president ekata");
     }
 
     private async Task<string> ConvertExistingAnswerAsync(
@@ -737,6 +933,157 @@ public sealed class GroqChatCompletionService
             cancellationToken);
 
         return CleanAnswer(converted);
+    }
+
+    private async Task<string> RewriteExistingAnswerAsync(
+        string existingAnswer,
+        string responseLanguage,
+        string responseStyle,
+        bool isClarification,
+        CancellationToken cancellationToken)
+    {
+        if (string.IsNullOrWhiteSpace(existingAnswer))
+        {
+            return BuildNotFoundMessage(responseLanguage);
+        }
+
+        var languageInstruction =
+            BuildLanguageInstruction(responseLanguage);
+
+        var styleInstruction =
+            BuildStyleInstruction(
+                responseStyle,
+                isClarification);
+
+        var rewritten = await SendChatAsync(
+            [
+                new GroqMessage
+                {
+                    Role = "system",
+                    Content = $"""
+                        Rewrite the supplied existing answer only.
+                        Preserve every fact, name, number and date.
+                        Do not search, infer, correct or add facts.
+                        Do not answer a different question.
+                        Return only the rewritten answer.
+
+                        {languageInstruction}
+
+                        {styleInstruction}
+                        """
+                },
+                new GroqMessage
+                {
+                    Role = "user",
+                    Content = existingAnswer
+                }
+            ],
+            temperature: 0,
+            maxCompletionTokens: 700,
+            cancellationToken);
+
+        rewritten = CleanAnswer(rewritten);
+
+        /*
+         * Latin-script English and Tanglish use the same Unicode range,
+         * so a model can occasionally ignore the requested style and
+         * return plain English. Validate Tanglish with common spoken-Tamil
+         * markers and retry once with a stricter instruction.
+         */
+        if (responseLanguage.Equals(
+                "Tanglish",
+                StringComparison.OrdinalIgnoreCase) &&
+            !LooksLikeTanglish(rewritten))
+        {
+            rewritten = await SendChatAsync(
+                [
+                    new GroqMessage
+                    {
+                        Role = "system",
+                        Content = """
+                            Rewrite the supplied answer in TANGLISH only.
+                            Tanglish means colloquial spoken Tamil written
+                            with English/Latin letters. It does NOT mean an
+                            English answer.
+
+                            Use natural Tamil wording such as: indha, idhu,
+                            unga, neenga, panna, ketka, mudiyum, pathi,
+                            irukku, sollum.
+
+                            Preserve all facts and every proper name exactly.
+                            Do not add facts. Use short, simple sentences.
+                            Return only the Tanglish answer.
+                            """
+                    },
+                    new GroqMessage
+                    {
+                        Role = "user",
+                        Content = existingAnswer
+                    }
+                ],
+                temperature: 0,
+                maxCompletionTokens: 700,
+                cancellationToken);
+
+            rewritten = CleanAnswer(rewritten);
+        }
+
+        return RestoreProtectedTerms(
+            existingAnswer,
+            rewritten);
+    }
+
+    private static bool LooksLikeTanglish(string answer)
+    {
+        if (string.IsNullOrWhiteSpace(answer))
+        {
+            return false;
+        }
+
+        var normalized =
+            answer.ToLowerInvariant();
+
+        var tanglishMarkers = new[]
+        {
+            "indha", "intha", "idhu", "ithu", "oru",
+            "unga", "ungal", "neenga", "ningal", "panna",
+            "pannum", "pannalaam", "ketka", "kekka", "kelvi",
+            "badhil", "pathi", "patri", "irukku", "irukkum",
+            "mudiyum", "sollum", "moolama", "adhula", "athula"
+        };
+
+        var markerCount = tanglishMarkers.Count(marker =>
+            normalized.Contains(
+                marker,
+                StringComparison.Ordinal));
+
+        return markerCount >= 2;
+    }
+
+    private static string RestoreProtectedTerms(
+        string originalAnswer,
+        string rewrittenAnswer)
+    {
+        if (originalAnswer.Contains(
+                "GazetteAI",
+                StringComparison.OrdinalIgnoreCase))
+        {
+            rewrittenAnswer = rewrittenAnswer
+                .Replace(
+                    "GazettAI",
+                    "GazetteAI",
+                    StringComparison.OrdinalIgnoreCase)
+                .Replace(
+                    "GazetteAl",
+                    "GazetteAI",
+                    StringComparison.OrdinalIgnoreCase)
+                .Replace(
+                    "Gazette AI",
+                    "GazetteAI",
+                    StringComparison.OrdinalIgnoreCase);
+        }
+
+        return rewrittenAnswer;
     }
 
     private async Task<string> RewriteExternalFollowUpAsync(
@@ -850,6 +1197,22 @@ public sealed class GroqChatCompletionService
                     StringComparison.OrdinalIgnoreCase))
             ?.Content
             ?.Trim() ?? string.Empty;
+    }
+
+    private static bool TryGetTransformableAssistantAnswer(
+        IReadOnlyList<ChatHistoryMessage> history,
+        out string answer)
+    {
+        answer = FindLatestAssistantAnswer(history);
+
+        if (string.IsNullOrWhiteSpace(answer) ||
+            IsGeneralPermissionPrompt(answer))
+        {
+            answer = string.Empty;
+            return false;
+        }
+
+        return true;
     }
 
     private static string FindPreviousResponseLanguage(
@@ -1554,10 +1917,19 @@ public sealed class GroqChatCompletionService
 
             "tanglish" =>
                 """
-                    Write the complete answer in natural spoken
-                    Tamil using only Latin letters.
+                    Write the complete answer in TANGLISH only:
+                    natural colloquial spoken Tamil written using
+                    English/Latin letters. Tanglish is not English.
+                    Use Tamil wording such as indha, idhu, unga,
+                    neenga, panna, mudiyum, pathi and irukku.
+                    Use "avar" for a person and natural Tamil
+                    sentence order. For assuming office, use
+                    "padhavi yetrar" or "padhavikku vandhar".
+                    Never use "inga" as a person pronoun and never
+                    use the phrase "office-ku vechirukku".
                     Do not use Tamil or Sinhala script.
                     Do not use Sinhala vocabulary.
+                    Do not write complete English sentences.
                     """,
 
             "sinhala" =>
@@ -1989,14 +2361,23 @@ public sealed class GroqChatCompletionService
             "general ai knowledge",
             "general knowledge",
             "outside the document",
+            "search the web",
+            "current information",
             "ஆவணத்திற்கு வெளியே",
             "பொதுவான அறிவைப்",
             "பொதுவான ai அறிவைப்",
+            "இணையத்தில் தேடி",
+            "சமீபத்திய தகவல்களுடன்",
             "document ekata pitin",
             "document eken pita",
+            "web-la search",
+            "web eke search",
             "සාමාන්‍ය ai දැනුම",
+            "වෙබ් අඩවියේ සොයා",
             "connaissances générales",
-            "सामान्य ai ज्ञान");
+            "recherche sur le web",
+            "सामान्य ai ज्ञान",
+            "वेब पर खोजकर");
     }
 
     private static bool IsCasualConversation(
@@ -2029,7 +2410,27 @@ public sealed class GroqChatCompletionService
     {
         var normalized = NormalizeShortMessage(text);
 
-        return IsPdfImageCapabilityQuestion(normalized) ||
+        /*
+         * Typo-tolerant capability detection. Users commonly stretch
+         * vowels or spell Tanglish phonetically, so matching a complete
+         * fixed phrase is too brittle. "help" together with a form of
+         * "can/do" is enough to identify the intent safely.
+         */
+        var asksForHelpCapabilities =
+            normalized.Contains(
+                "help",
+                StringComparison.Ordinal) &&
+            ContainsAny(
+                normalized,
+                "mudium",
+                "mudiyum",
+                "panna",
+                "paanna",
+                "can you",
+                "could you");
+
+        return asksForHelpCapabilities ||
+            IsPdfImageCapabilityQuestion(normalized) ||
             ContainsAny(
             normalized,
             "what can you do",
@@ -2175,7 +2576,41 @@ public sealed class GroqChatCompletionService
             };
         }
 
-        return BuildCasualResponse(question, language);
+        return requestedLanguage switch
+        {
+            "tamil" =>
+                "நான் PDF ஆவணங்களைப் படித்து சுருக்கம் சொல்லவும், " +
+                "அவற்றிலுள்ள தகவல்களின் அடிப்படையில் கேள்விகளுக்குப் " +
+                "பதில் அளிக்கவும், மொழிபெயர்க்கவும், எளிமையாக " +
+                "விளக்கவும் உதவ முடியும். ஆவணத்திற்கு வெளியான தற்போதைய " +
+                "தகவல் வேண்டுமெனில், உங்கள் அனுமதியுடன் இணையத்தில் " +
+                "தேடியும் சொல்ல முடியும்.",
+
+            "tanglish" =>
+                "Naan PDF document-ai read panni summary solla, " +
+                "adhula irukkira information basis-la questions-ku " +
+                "answer panna, translate panna, simple-ah explain panna " +
+                "help mudiyum. Document-ku veliya current information " +
+                "venumna, unga permission-oda web-la search panniyum " +
+                "solla mudiyum.",
+
+            "sinhala" =>
+                "මට PDF ලේඛන කියවා සාරාංශ කිරීමට, ඒවායේ තොරතුරු " +
+                "මත ප්‍රශ්නවලට පිළිතුරු දීමට, පරිවර්තනය කිරීමට සහ " +
+                "සරලව පැහැදිලි කිරීමට උදව් කළ හැකිය.",
+
+            "singlish" =>
+                "Mata PDF document read karala summary denna, eke " +
+                "information anuwa questions walata answer karanna, " +
+                "translate karanna saha simple widihata explain karanna " +
+                "puluwan.",
+
+            _ =>
+                "I can read and summarize PDF documents, answer questions " +
+                "from their content, translate answers, and explain them " +
+                "more simply. For current information outside the document, " +
+                "I can also search the web with your permission."
+        };
     }
 
     private static bool IsPdfImageCapabilityQuestion(
@@ -2221,68 +2656,222 @@ public sealed class GroqChatCompletionService
     }
 
     private static bool IsExplicitExternalRequest(
-        string text)
+    string text)
     {
+        if (string.IsNullOrWhiteSpace(text))
+        {
+            return false;
+        }
+
         var normalized = NormalizeShortMessage(text);
+
+        /*
+         * IMPORTANT:
+         *
+         * This method returns TRUE only when the user
+         * explicitly asks to use information outside
+         * the uploaded document.
+         *
+         * Words such as:
+         *
+         * current
+         * latest
+         * today
+         * now
+         * recent
+         * 2026
+         *
+         * are NOT enough to return true.
+         *
+         * GazetteAI must first search the uploaded
+         * document.
+         *
+         * If the answer is not found in the document,
+         * then the system asks permission before
+         * searching the web.
+         */
 
         return ContainsAny(
             normalized,
+
+            // =========================================
+            // ENGLISH - OUTSIDE DOCUMENT
+            // =========================================
+
             "outside this document",
             "outside the document",
+            "outside this pdf",
+            "outside the pdf",
+
             "beyond this document",
+            "beyond the document",
+
+            "not from this document",
+            "not from the document",
+
+            "information outside the document",
+
+
+            // =========================================
+            // ENGLISH - GENERAL KNOWLEDGE
+            // =========================================
+
             "from general knowledge",
             "using general knowledge",
+            "use general knowledge",
+
+            "general knowledge answer",
+
+
+            // =========================================
+            // ENGLISH - WEB / INTERNET
+            // =========================================
+
             "search the internet",
+            "search internet",
+
+            "search the web",
+            "search web",
+
             "search online",
+
+            "look it up online",
+            "look up online",
+
+            "find it online",
+            "find online",
+
+            "check the internet",
+            "check online",
+
+            "use the internet",
+            "use internet",
+
+            "use the web",
+
             "web search",
+            "internet search",
+
+
+            // =========================================
+            // TANGLISH - OUTSIDE DOCUMENT
+            // =========================================
+
             "document-ku veliya",
+            "document ku veliya",
+
+            "document-la illama",
             "document la illama",
+
+            "pdf-ku veliya",
+            "pdf ku veliya",
+
+            "pdf-la illama",
+            "pdf la illama",
+
+
+            // =========================================
+            // TANGLISH - WEB SEARCH
+            // =========================================
+
+            "web-la search",
+            "web la search",
+
+            "web-la thedu",
+            "web la thedu",
+
+            "web-la thedi",
+            "web la thedi",
+
+            "internet-la search",
+            "internet la search",
+
+            "internet-la thedu",
+            "internet la thedu",
+
+            "internet-la thedi",
+            "internet la thedi",
+
+            "online-la search",
+            "online la search",
+
+            "online-la thedu",
+            "online la thedu",
+
+            "online-la thedi",
+            "online la thedi",
+
+
+            // =========================================
+            // TAMIL - OUTSIDE DOCUMENT
+            // =========================================
+
             "ஆவணத்திற்கு வெளியே",
-            "இணையத்தில் தேடு");
+            "ஆவணத்துக்கு வெளியே",
+
+            "இந்த ஆவணத்திற்கு வெளியே",
+            "இந்த ஆவணத்துக்கு வெளியே",
+
+            "pdfக்கு வெளியே",
+            "pdf க்கு வெளியே",
+
+
+            // =========================================
+            // TAMIL - WEB / INTERNET SEARCH
+            // =========================================
+
+            "இணையத்தில் தேடு",
+            "இணையத்தில் தேடி",
+
+            "இணையத்தில் தேடவும்",
+
+            "வலையில் தேடு",
+            "வலையில் தேடி",
+
+            "இணையத்திலிருந்து",
+            "வலையிலிருந்து"
+        );
     }
 
     private static string BuildGeneralPermissionPrompt(
-        string? language)
+    string? language)
     {
         return language?
             .Trim()
             .ToLowerInvariant() switch
         {
             "tamil" =>
-                "இந்தக் கேள்வி பதிவேற்றிய ஆவணத்துடன் " +
-                "தொடர்புடையது அல்ல. பொதுவான AI அறிவைப் " +
-                "பயன்படுத்தி பதில் சொல்லவா?",
+                "இந்தக் கேள்விக்கு பதிவேற்றிய ஆவணத்திற்கு வெளியான தகவல் " +
+                "தேவைப்படுகிறது. இணையத்தில் தேடி தற்போதைய தகவல்களுடன் " +
+                "பதில் சொல்லவா?",
 
             "tanglish" =>
-                "Indha question uploaded document-oda " +
-                "related illa. General AI knowledge use " +
-                "panni answer sollava?",
+                "Indha question-ku uploaded document-ku veliya information " +
+                "thevai. Web-la search panni current information-oda " +
+                "answer sollava?",
 
             "sinhala" =>
-                "මෙම ප්‍රශ්නය උඩුගත කළ ලේඛනයට අදාළ නැහැ. " +
-                "සාමාන්‍ය AI දැනුමෙන් පිළිතුරු දෙන්නද?",
+                "මෙම ප්‍රශ්නයට ලේඛනයෙන් පිටත තොරතුරු අවශ්‍යයි. " +
+                "වෙබ් අඩවියේ සොයා නවතම තොරතුරු සමඟ පිළිතුරු දෙන්නද?",
 
             "singlish" =>
-                "Me question eka uploaded document ekata " +
-                "related naha. General AI knowledge use " +
-                "karala answer karannada?",
+                "Me question ekata document eken pita information one. " +
+                "Web eke search karala current information ekka answer karannada?",
 
             "french" =>
-                "Cette question ne concerne pas le document. " +
-                "Voulez-vous une réponse basée sur les " +
-                "connaissances générales de l’IA ?",
+                "Cette question nécessite des informations extérieures au document. " +
+                "Voulez-vous que je recherche sur le Web et réponde avec des " +
+                "informations actuelles ?",
 
             "hindi" =>
-                "यह प्रश्न अपलोड किए गए दस्तावेज़ से संबंधित " +
-                "नहीं है। क्या मैं सामान्य AI ज्ञान से उत्तर दूँ?",
+                "इस प्रश्न के लिए दस्तावेज़ के बाहर की जानकारी चाहिए। " +
+                "क्या मैं वेब पर खोजकर वर्तमान जानकारी के साथ उत्तर दूँ?",
 
             _ =>
-                "This question is not related to the uploaded " +
-                "document. Would you like an answer using " +
-                "general AI knowledge?"
+                "This question requires information outside the uploaded document. " +
+                "Would you like me to search the web and answer using current information?"
         };
     }
-
     private static string BuildCasualResponse(
         string question,
         string? language)
